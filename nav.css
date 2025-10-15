@@ -1,0 +1,70 @@
+/* Sidebar / Navigation styles - responsive sticky sidebar and hamburger menu */
+:root{
+  --sidebar-width: 260px;
+  --accent-color: #0066cc;
+  --bg: #fafafa;
+  --text: #222;
+}
+
+/* common reset for the nav area */
+.gp-nav-wrapper{font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;}
+
+/* sidebar container */
+.gp-sidebar{
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 100vh;
+  width: var(--sidebar-width);
+  background: white;
+  border-right: 1px solid #e6e6e6;
+  padding: 20px 16px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  z-index: 1000;
+  transition: transform 0.22s ease;
+}
+
+/* collapsed on small screens */
+.gp-sidebar.hidden{transform: translateX(-110%);} 
+
+.gp-sidebar h2{font-size:18px;margin:0 0 12px 0;color:var(--text)}
+.gp-sidebar .gp-logo{font-weight:700;margin-bottom:8px}
+.gp-sidebar p.desc{font-size:13px;color:#555;margin-bottom:14px}
+
+.gp-nav-list{list-style:none;padding:0;margin:0}
+.gp-nav-list li{margin:6px 0}
+.gp-nav-list a{color:var(--accent-color);text-decoration:none;font-size:15px}
+.gp-nav-list a:hover{text-decoration:underline}
+
+/* hamburger / top bar for small screens */
+.gp-topbar{
+  display:none; /* hidden on desktop */
+  position:fixed;
+  top:0;left:0;right:0;
+  height:48px;
+  background:white;
+  border-bottom:1px solid #e6e6e6;
+  z-index:999;
+  align-items:center;
+  padding:0 12px;
+  box-sizing:border-box;
+}
+.gp-topbar .gp-toggle{background:none;border:0;font-size:20px}
+.gp-topbar .gp-title{margin-left:12px;font-weight:600}
+
+/* push content to the right so sidebar doesn't overlap */
+.gp-content-with-sidebar{margin-left:var(--sidebar-width);padding:20px}
+
+/* small screens adjustments */
+@media (max-width: 900px){
+  .gp-sidebar{transform:translateX(-110%);box-shadow:0 6px 24px rgba(0,0,0,0.08)}
+  .gp-topbar{display:flex}
+  .gp-content-with-sidebar{margin-left:0;padding-top:62px}
+}
+
+/* quick accessibility focus styles */
+.gp-nav-list a:focus{outline:2px solid rgba(0,102,204,0.25);outline-offset:2px}
+
+/* small helper for chapter numbering */
+.gp-ch-num{color:#333;font-weight:600;margin-right:6px}
