@@ -26,7 +26,22 @@
 }
 
 /* collapsed on small screens */
-.gp-sidebar.hidden{transform: translateX(-110%);} 
+.gp-sidebar.hidden{transform: translateX(-110%);}
+
+/* background overlay when sidebar is open on mobile */
+.gp-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0,0,0,0.5);
+  z-index: 9990;
+}
+.gp-overlay.visible {
+  display: block;
+} 
 
 .gp-sidebar h2{font-size:18px;margin:0 0 12px 0;color:var(--text)}
 .gp-sidebar .gp-logo{font-weight:700;margin-bottom:8px}
@@ -45,12 +60,32 @@
   height:48px;
   background:white;
   border-bottom:1px solid #e6e6e6;
-  z-index:999;
+  z-index:9999; /* above everything else */
   align-items:center;
   padding:0 12px;
   box-sizing:border-box;
+  -webkit-tap-highlight-color: rgba(0,0,0,0);
 }
-.gp-topbar .gp-toggle{background:none;border:0;font-size:20px}
+.gp-topbar .gp-toggle{
+  background:none;
+  border:0;
+  font-size:24px;
+  cursor:pointer;
+  position:relative;
+  z-index:9999;
+  outline:none;
+}
+.gp-topbar, .gp-topbar *{pointer-events:auto}
+.gp-topbar .gp-toggle{padding:8px 10px;border-radius:6px}
+/* debug / easier tap target on mobile */
+@media (max-width: 900px){
+  .gp-topbar .gp-toggle{
+    background:rgba(0,102,204,0.1);
+    font-size:24px;
+    padding:10px 12px;
+    margin-left:5px;
+  }
+}
 .gp-topbar .gp-title{margin-left:12px;font-weight:600}
 
 /* push content to the right so sidebar doesn't overlap */
@@ -58,7 +93,14 @@
 
 /* small screens adjustments */
 @media (max-width: 900px){
-  .gp-sidebar{transform:translateX(-110%);box-shadow:0 6px 24px rgba(0,0,0,0.08)}
+  .gp-sidebar{
+    transform:translateX(-110%);
+    box-shadow:0 6px 24px rgba(0,0,0,0.2);
+    z-index:9998;
+  }
+  .gp-sidebar:not(.hidden) {
+    transform:translateX(0);
+  }
   .gp-topbar{display:flex}
   .gp-content-with-sidebar{margin-left:0;padding-top:62px}
 }

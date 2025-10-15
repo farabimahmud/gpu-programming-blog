@@ -23,10 +23,16 @@
         </nav>
         <div style="height:28px"></div>
       </div>
-      <div class="gp-topbar" id="gp-topbar">
-        <button class="gp-toggle" id="gp-toggle" aria-label="Toggle navigation">☰</button>
-        <div class="gp-title">CUDA GEMM টিউটোরিয়াল</div>
-      </div>
+    </div>
+    `;
+  }
+  
+  // Create the topbar separately to avoid nesting/stacking context issues
+  function buildTopBarHtml() {
+    return `
+    <div class="gp-topbar" id="gp-topbar">
+      <button class="gp-toggle" id="gp-toggle" aria-label="Toggle navigation">☰</button>
+      <div class="gp-title">CUDA GEMM টিউটোরিয়াল</div>
     </div>
     `;
   }
@@ -51,14 +57,33 @@
       document.body.insertBefore(root, document.body.firstChild);
     }
 
+    // Create the topbar directly in document.body (outside any stacking context)
+    var topbarRoot = document.createElement('div');
+    topbarRoot.id = 'topbar-root';
+    topbarRoot.style.position = 'fixed'; // Change from relative to fixed
+    topbarRoot.style.top = '0';
+    topbarRoot.style.left = '0';
+    topbarRoot.style.right = '0';
+    topbarRoot.style.zIndex = '9999';
+    document.body.insertBefore(topbarRoot, document.body.firstChild);
+    
+    // Create overlay for mobile
+    var overlay = document.createElement('div');
+    overlay.className = 'gp-overlay';
+    overlay.id = 'gp-overlay';
+    document.body.insertBefore(overlay, document.body.firstChild);
+    
     // inject sidebar HTML
     root.innerHTML = buildSidebarHtml();
+    
+    // inject topbar HTML (outside sidebar DOM to avoid z-index stacking issues)
+    topbarRoot.innerHTML = buildTopBarHtml();
 
     // add class to main content so it gets margin
     document.documentElement.classList.add('gp-nav-mounted');
 
     // find main content area (heuristic) and add wrapper class
-    var firstMain = document.querySelector('body > *:not(#sidebar-root)');
+    var firstMain = document.querySelector('body > *:not(#sidebar-root):not(#topbar-root)');
     // If index page has direct content, wrap everything except the sidebar-root
     var content = document.querySelector('.gp-content-with-sidebar');
     if(!content){
@@ -72,11 +97,22 @@
     var toggle = document.getElementById('gp-toggle');
     var topbar = document.getElementById('gp-topbar');
 
+    var overlay = document.getElementById('gp-overlay');
+    
     function hideSidebar(){
-      sidebar.classList.add('hidden');
+      console.log('Hiding sidebar');
+      if (sidebar && sidebar.classList) sidebar.classList.add('hidden');
+      if (toggle) toggle.setAttribute('aria-expanded', 'false');
+      if (overlay) overlay.classList.remove('visible');
+      document.body.style.overflow = '';
     }
+    
     function showSidebar(){
-      sidebar.classList.remove('hidden');
+      console.log('Showing sidebar');
+      if (sidebar && sidebar.classList) sidebar.classList.remove('hidden');
+      if (toggle) toggle.setAttribute('aria-expanded', 'true');
+      if (overlay) overlay.classList.add('visible');
+      document.body.style.overflow = 'hidden'; // Prevent body scrolling when menu is open
     }
 
     // start hidden on small screens
@@ -86,17 +122,48 @@
       if(window.innerWidth <= 900) hideSidebar(); else showSidebar();
     });
 
-    toggle && toggle.addEventListener('click', function(e){
-      if(sidebar.classList.contains('hidden')) showSidebar(); else hideSidebar();
-    });
+    if (toggle) {
+      var toggleHandler = function(e){
+        console.log('Toggle clicked/touched');
+        if (e && e.stopPropagation) e.stopPropagation();
+        if (e && e.preventDefault) e.preventDefault();
+        
+        // defensive checks
+        if (!sidebar) {
+          console.log('No sidebar found');
+          return;
+        }
+        
+        if (sidebar.classList.contains('hidden')) {
+          console.log('Sidebar was hidden, showing it now');
+          showSidebar();
+        } else {
+          console.log('Sidebar was visible, hiding it now');
+          hideSidebar();
+        }
+      };
+      
+      // Use simpler event handling to avoid propagation issues
+      toggle.onclick = toggleHandler;
+      
+      // Handle touch events separately
+      toggle.addEventListener('touchend', function(e) {
+        e.preventDefault();
+        toggleHandler(e);
+      }, {passive: false});
+      // initialize aria state
+      toggle.setAttribute('aria-expanded', window.innerWidth > 900 ? 'true' : 'false');
+    }
 
-    // close when clicking outside on small screens
-    document.addEventListener('click', function(e){
-      if(window.innerWidth > 900) return;
-      if(!sidebar.contains(e.target) && !toggle.contains(e.target)){
+    // Close when clicking overlay
+    if (overlay) {
+      overlay.addEventListener('click', function(e) {
+        console.log('Overlay clicked');
+        e.preventDefault();
+        e.stopPropagation();
         hideSidebar();
-      }
-    });
+      });
+    }
 
     // keyboard accessibility: Esc to close
     document.addEventListener('keydown', function(e){
