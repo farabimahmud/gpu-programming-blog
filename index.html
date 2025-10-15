@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA GEMM টিউটোরিয়াল</title>
+    <style>
+        body {
+            max-width: 650px;
+            margin: 40px auto;
+            padding: 0 20px;
+            font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.8;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 24px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul {
+            margin-bottom: 20px;
+            padding-left: 30px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 40px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>CUDA GEMM টিউটোরিয়াল: নেইভ থেকে হাই-পারফরম্যান্স</h1>
+    
+    <p>CUDA তে হাই-পারফরম্যান্স ম্যাট্রিক্স মাল্টিপ্লিকেশন কার্নেল লেখার ধাপে ধাপে গাইড। আমরা একটি সিম্পল ইমপ্লিমেন্টেশন থেকে শুরু করে পর্যায়ক্রমে অপটিমাইজ করব NVIDIA T4 GPU তে cuBLAS এর 70-85% পারফরম্যান্স অর্জন করতে।</p>
+
+    <p><strong>পূর্বশর্ত:</strong> বেসিক C++ জ্ঞান। GPU প্রোগ্রামিং অভিজ্ঞতা প্রয়োজন নেই।</p>
+
+    <p><strong>প্ল্যাটফর্ম:</strong> Google Colab (বিনামূল্যে GPU অ্যাকসেস)</p>
+
+    <h2>অধ্যায়সমূহ</h2>
+
+    <ul>
+        <li><a href="chapter1.html">অধ্যায় ১: পরিচিতি ও সেটআপ</a> - GPU বোঝা, CUDA বেসিকস, এবং Google Colab-এ nvcc সেট আপ করা</li>
+        
+        <li><a href="chapter2.html">অধ্যায় ২: নেইভ GEMM কার্নেল</a> - প্রতিটি আউটপুট এলিমেন্টের জন্য একটি থ্রেড ব্যবহার করে আপনার প্রথম ম্যাট্রিক্স গুণ কার্নেল তৈরি করা (বেসলাইন)</li>
+        
+        <li><a href="chapter3.html">অধ্যায় ৩: T4 GPU আর্কিটেকচার বোঝা</a> - মেমরি হায়ারার্কি, SM, ওয়ার্প, এবং সেগুলি কীভাবে GEMM পারফরম্যান্স প্রভাবিত করে</li>
+        
+        <li><a href="chapter4.html">অধ্যায় ৪: কোয়ালেস্ড মেমরি অ্যাকসেস</a> - গ্লোবাল মেমরি রিড অপটিমাইজ করা (~2-3x স্পীডআপ)</li>
+        
+        <li><a href="chapter5.html">অধ্যায় ৫: শেয়ার্ড মেমরি টাইলিং</a> - গ্লোবাল মেমরি ট্র্যাফিক কমাতে অন-চিপ মেমরি ব্যবহার করা (~10-15x স্পীডআপ)</li>
+        
+        <li><a href="chapter6.html">অধ্যায় ৬: থ্রেড ব্লক টাইল অপটিমাইজেশন</a> - T4 আর্কিটেকচারের জন্য টাইল সাইজ টিউন করে অকিউপেন্সি ম্যাক্সিমাইজ করা (~20-25x স্পীডআপ)</li>
+        
+        <li><a href="chapter7.html">অধ্যায় ৭: 1D ব্লকটাইলিং উইদ ওয়াইডার লোডস</a> - ভেক্টরাইজড লোড (float4) ব্যবহার করে আরও ভাল মেমরি থ্রুপুট (~30-35x স্পীডআপ)</li>
+        
+        <li><a href="chapter8.html">অধ্যায় ৮: 2D ব্লকটাইলিং ও রেজিস্টার রিইউজ</a> - প্রতি থ্রেডে একাধিক আউটপুট এলিমেন্ট কম্পিউট করা (~40-50x স্পীডআপ)</li>
+        
+        <li><a href="chapter9.html">অধ্যায় ৯: ওয়ার্প-লেভেল টাইলিং ও লুপ আনরোলিং</a> - মেমরি অ্যাকসেস প্যাটার্ন ফাইন-টিউনিং এবং ইন্সট্রাকশন ওভারহেড কমানো (~60-70x স্পীডআপ)</li>
+        
+        <li><a href="chapter10.html">অধ্যায় ১০: বেঞ্চমার্কিং ও কম্পারিজন</a> - cuBLAS এর সাথে তুলনা এবং নির্দিষ্ট ম্যাট্রিক্স আকারের জন্য পারফরম্যান্স বিশ্লেষণ</li>
+    </ul>
+
+    <hr>
+
+    <p><a href="chapter1.html">অধ্যায় ১: পরিচিতি ও সেটআপ</a> দিয়ে শুরু করুন</p>
+
+</body>
+</html>

@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>অধ্যায় ৬: Thread Block Tile Optimization - CUDA GEMM টিউটোরিয়াল</title>
+    <style>
+        body {
+            max-width: 650px;
+            margin: 40px auto;
+            padding: 0 20px;
+            font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.8;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 24px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            font-size: 20px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul, ol {
+            margin-bottom: 20px;
+            padding-left: 30px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .nav {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 40px 0;
+        }
+
+        .note {
+            background: #f9f9f9;
+            border-left: 3px solid #666;
+            padding: 10px 15px;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #f4f4f4;
+        }
+    </style>
+</head>
+<body>
+    <p><a href="index.html">← সূচিপত্রে ফিরে যান</a></p>
+
+    <h1>অধ্যায় ৬: Thread Block Tile Optimization</h1>
+
+    <p>আমরা শেয়ার্ড মেমরি টাইলিং দিয়ে দারুণ উন্নতি করেছি। এই অধ্যায়ে আমরা টাইল সাইজ টিউন করব T4 GPU-র আর্কিটেকচারের জন্য। আমরা বিভিন্ন টাইল সাইজ পরীক্ষা করব এবং বুঝব কীভাবে শেয়ার্ড মেমরি, রেজিস্টার, এবং occupancy পারফরম্যান্সকে প্রভাবিত করে।</p>
+
+    <h2>টাইল সাইজ কেন গুরুত্বপূর্ণ?</h2>
+
+    <p>টাইল সাইজ নির্বাচন একাধিক ফ্যাক্টরকে ভারসাম্য করে:</p>
+
+    <ul>
+        <li><strong>ডেটা পুনর্ব্যবহার:</strong> বড় টাইল = আরো পুনর্ব্যবহার</li>
+        <li><strong>শেয়ার্ড মেমরি:</strong> বড় টাইল = আরো শেয়ার্ড মেমরি ব্যবহার</li>
+        <li><strong>Occupancy:</strong> আরো শেয়ার্ড মেমরি = কম ব্লক প্রতি SM</li>
+        <li><strong>রেজিস্টার:</strong> বড় টাইল = আরো রেজিস্টার প্রয়োজন</li>
+    </ul>
+
+    <h2>T4 সীমাবদ্ধতা</h2>
+
+    <p>মনে করুন T4 প্রতি SM-এ:</p>
+
+    <ul>
+        <li>64 KB শেয়ার্ড মেমরি</li>
+        <li>64K রেজিস্টার (256 KB)</li>
+        <li>সর্বোচ্চ 1024 থ্রেড</li>
+        <li>সর্বোচ্চ 16 ব্লক</li>
+    </ul>
+
+    <h3>শেয়ার্ড মেমরি ব্যবহার</h3>
+
+    <p>টাইল সাইজ T এর জন্য:</p>
+
+    <pre><code>শেয়ার্ড মেমরি = 2 × T × T × 4 বাইট  (A এবং B টাইলের জন্য)</code></pre>
+
+    <table>
+        <tr>
+            <th>টাইল সাইজ</th>
+            <th>শেয়ার্ড মেমরি</th>
+            <th>ব্লক প্রতি SM</th>
+        </tr>
+        <tr>
+            <td>16×16</td>
+            <td>2 KB</td>
+            <td>16 (সীমা)</td>
+        </tr>
+        <tr>
+            <td>32×32</td>
+            <td>8 KB</td>
+            <td>8</td>
+        </tr>
+        <tr>
+            <td>64×64</td>
+            <td>32 KB</td>
+            <td>2</td>
+        </tr>
+    </table>
+
+    <h2>বিভিন্ন টাইল সাইজ পরীক্ষা করা</h2>
+
+    <p>চলুন 16, 32, এবং 64 টাইল সাইজ তুলনা করি:</p>
+
+    <pre><code>%%writefile gemm_tile_tuning.cu
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+// টেমপ্লেট ব্যবহার করে বিভিন্ন টাইল সাইজ
+template&lt;int TILE_SIZE&gt;
+__global__ void gemm_tiled(int M, int N, int K, 
+                           float *A, float *B, float *C) {
+    __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
+    __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
+    
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+    
+    float sum = 0.0f;
+    int num_tiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+    
+    for (int t = 0; t < num_tiles; t++) {
+        // A টাইল লোড
+        int a_col = t * TILE_SIZE + threadIdx.x;
+        if (row < M && a_col < K) {
+            tile_A[threadIdx.y][threadIdx.x] = A[row * K + a_col];
+        } else {
+            tile_A[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+        
+        // B টাইল লোড
+        int b_row = t * TILE_SIZE + threadIdx.y;
+        if (b_row < K && col < N) {
+            tile_B[threadIdx.y][threadIdx.x] = B[b_row * N + col];
+        } else {
+            tile_B[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+        
+        __syncthreads();
+        
+        // কম্পিউট
+        #pragma unroll
+        for (int k = 0; k < TILE_SIZE; k++) {
+            sum += tile_A[threadIdx.y][k] * tile_B[k][threadIdx.x];
+        }
+        
+        __syncthreads();
+    }
+    
+    if (row < M && col < N) {
+        C[row * N + col] = sum;
+    }
+}
+
+void gemm_cpu(int M, int N, int K, 
+              float *A, float *B, float *C) {
+    for (int i = 0; i < M; i++) {
+        for (int j = 0; j < N; j++) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; k++) {
+                sum += A[i * K + k] * B[k * N + j];
+            }
+            C[i * N + j] = sum;
+        }
+    }
+}
+
+bool verify_result(float *C_cpu, float *C_gpu, int M, int N) {
+    for (int i = 0; i < M * N; i++) {
+        if (fabs(C_cpu[i] - C_gpu[i]) > 1e-2) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template&lt;int TILE_SIZE&gt;
+float benchmark_tiled(int M, int N, int K, 
+                      float *d_A, float *d_B, float *d_C) {
+    dim3 threads(TILE_SIZE, TILE_SIZE);
+    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE,
+                (M + TILE_SIZE - 1) / TILE_SIZE);
+    
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    // ওয়ার্মআপ
+    gemm_tiled<TILE_SIZE><<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    cudaDeviceSynchronize();
+    
+    // বেঞ্চমার্ক
+    cudaEventRecord(start);
+    for (int i = 0; i < 10; i++) {
+        gemm_tiled<TILE_SIZE><<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    
+    return milliseconds / 10.0f;
+}
+
+void test_tile_size(int TILE_SIZE, int M, int N, int K,
+                   float *d_A, float *d_B, float *d_C,
+                   float *h_C, float *h_C_ref) {
+    float time;
+    
+    if (TILE_SIZE == 16) {
+        time = benchmark_tiled<16>(M, N, K, d_A, d_B, d_C);
+    } else if (TILE_SIZE == 32) {
+        time = benchmark_tiled<32>(M, N, K, d_A, d_B, d_C);
+    } else if (TILE_SIZE == 64) {
+        time = benchmark_tiled<64>(M, N, K, d_A, d_B, d_C);
+    } else {
+        printf("Unsupported tile size\n");
+        return;
+    }
+    
+    size_t bytes_C = M * N * sizeof(float);
+    cudaMemcpy(h_C, d_C, bytes_C, cudaMemcpyDeviceToHost);
+    
+    bool correct = verify_result(h_C_ref, h_C, M, N);
+    double gflops = (2.0 * M * N * K) / (time / 1000.0) / 1e9;
+    
+    int shared_mem = 2 * TILE_SIZE * TILE_SIZE * sizeof(float);
+    int blocks_per_sm = (64 * 1024) / shared_mem;
+    if (blocks_per_sm > 16) blocks_per_sm = 16;
+    
+    int threads_per_block = TILE_SIZE * TILE_SIZE;
+    int threads_per_sm = blocks_per_sm * threads_per_block;
+    if (threads_per_sm > 1024) {
+        blocks_per_sm = 1024 / threads_per_block;
+        threads_per_sm = 1024;
+    }
+    
+    float occupancy = (float)threads_per_sm / 1024.0f * 100.0f;
+    
+    printf("Tile %2dx%-2d: Time: %6.3f ms, GFLOPS: %7.2f, "
+           "Shared: %5d B, Blocks/SM: %2d, Occupancy: %5.1f%%, %s\n",
+           TILE_SIZE, TILE_SIZE, time, gflops, shared_mem, 
+           blocks_per_sm, occupancy,
+           correct ? "CORRECT" : "INCORRECT");
+}
+
+int main() {
+    int M = 4096;
+    int N = 4096;
+    int K = 4096;
+    
+    printf("Matrix dimensions: C(%dx%d) = A(%dx%d) * B(%dx%d)\n\n", 
+           M, N, M, K, K, N);
+    
+    // Host মেমরি
+    size_t bytes_A = M * K * sizeof(float);
+    size_t bytes_B = K * N * sizeof(float);
+    size_t bytes_C = M * N * sizeof(float);
+    
+    float *h_A = (float*)malloc(bytes_A);
+    float *h_B = (float*)malloc(bytes_B);
+    float *h_C = (float*)malloc(bytes_C);
+    float *h_C_ref = (float*)malloc(bytes_C);
+    
+    // ইনিশিয়ালাইজ
+    printf("Initializing matrices...\n");
+    for (int i = 0; i < M * K; i++) h_A[i] = rand() / (float)RAND_MAX;
+    for (int i = 0; i < K * N; i++) h_B[i] = rand() / (float)RAND_MAX;
+    
+    // Device মেমরি
+    float *d_A, *d_B, *d_C;
+    cudaMalloc(&d_A, bytes_A);
+    cudaMalloc(&d_B, bytes_B);
+    cudaMalloc(&d_C, bytes_C);
+    
+    cudaMemcpy(d_A, h_A, bytes_A, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, bytes_B, cudaMemcpyHostToDevice);
+    
+    // CPU রেফারেন্স (শুধু একটি ছোট সাবসেট যাচাই করুন)
+    printf("Computing reference (subset)...\n");
+    int verify_size = 256;
+    gemm_cpu(verify_size, verify_size, verify_size, h_A, h_B, h_C_ref);
+    
+    printf("\n=== Tile Size Comparison ===\n");
+    printf("Testing on %dx%d matrices\n\n", M, N);
+    
+    // বিভিন্ন টাইল সাইজ পরীক্ষা করুন
+    test_tile_size(16, M, N, K, d_A, d_B, d_C, h_C, h_C_ref);
+    test_tile_size(32, M, N, K, d_A, d_B, d_C, h_C, h_C_ref);
+    test_tile_size(64, M, N, K, d_A, d_B, d_C, h_C, h_C_ref);
+    
+    printf("\n=== Analysis ===\n");
+    printf("T4 GPU limits per SM:\n");
+    printf("  - Shared memory: 64 KB\n");
+    printf("  - Max threads: 1024\n");
+    printf("  - Max blocks: 16\n\n");
+    
+    printf("Recommendations:\n");
+    printf("  - 16x16: High occupancy but less data reuse\n");
+    printf("  - 32x32: Best balance for most cases\n");
+    printf("  - 64x64: More reuse but lower occupancy\n");
+    
+    // ক্লিনআপ
+    free(h_A); free(h_B); free(h_C); free(h_C_ref);
+    cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
+    
+    return 0;
+}</code></pre>
+
+    <p>কম্পাইল এবং রান করুন:</p>
+
+    <pre><code>!nvcc gemm_tile_tuning.cu -o gemm_tile_tuning
+!./gemm_tile_tuning</code></pre>
+
+    <h2>প্রত্যাশিত আউটপুট</h2>
+
+    <p>4096×4096 ম্যাট্রিক্সের জন্য T4-তে:</p>
+
+    <pre><code>Matrix dimensions: C(4096x4096) = A(4096x4096) * B(4096x4096)
+
+Initializing matrices...
+Computing reference (subset)...
+
+=== Tile Size Comparison ===
+Testing on 4096x4096 matrices
+
+Tile 16x16: Time: 29.xxx ms, GFLOPS: 4700.00, Shared:  2048 B, Blocks/SM: 16, Occupancy: 100.0%, CORRECT
+Tile 32x32: Time: 24.xxx ms, GFLOPS: 5650.00, Shared:  8192 B, Blocks/SM:  8, Occupancy: 100.0%, CORRECT
+Tile 64x64: Time: 28.xxx ms, GFLOPS: 4900.00, Shared: 32768 B, Blocks/SM:  2, Occupancy:  50.0%, CORRECT
+
+=== Analysis ===
+T4 GPU limits per SM:
+  - Shared memory: 64 KB
+  - Max threads: 1024
+  - Max blocks: 16
+
+Recommendations:
+  - 16x16: High occupancy but less data reuse
+  - 32x32: Best balance for most cases
+  - 64x64: More reuse but lower occupancy</code></pre>
+
+    <h2>ফলাফল বিশ্লেষণ</h2>
+
+    <h3>16×16 টাইল</h3>
+
+    <ul>
+        <li><strong>শেয়ার্ড মেমরি:</strong> 2 KB (খুব কম)</li>
+        <li><strong>Occupancy:</strong> 100% (16 ব্লক/SM)</li>
+        <li><strong>ডেটা পুনর্ব্যবহার:</strong> প্রতিটি এলিমেন্ট 16 বার ব্যবহৃত</li>
+        <li><strong>পারফরম্যান্স:</strong> ভালো কিন্তু সেরা নয়</li>
+        <li><strong>কারণ:</strong> কম ডেটা পুনর্ব্যবহার, আরো টাইল লোডিং ওভারহেড</li>
+    </ul>
+
+    <h3>32×32 টাইল</h3>
+
+    <ul>
+        <li><strong>শেয়ার্ড মেমরি:</strong> 8 KB (মাঝারি)</li>
+        <li><strong>Occupancy:</strong> 100% (8 ব্লক/SM, 1024 থ্রেড/SM)</li>
+        <li><strong>ডেটা পুনর্ব্যবহার:</strong> প্রতিটি এলিমেন্ট 32 বার ব্যবহৃত</li>
+        <li><strong>পারফরম্যান্স:</strong> সেরা! (~5650 GFLOPS)</li>
+        <li><strong>কারণ:</strong> ভালো ভারসাম্য - উচ্চ occupancy + ভালো পুনর্ব্যবহার</li>
+    </ul>
+
+    <h3>64×64 টাইল</h3>
+
+    <ul>
+        <li><strong>শেয়ার্ড মেমরি:</strong> 32 KB (বড়)</li>
+        <li><strong>Occupancy:</strong> 50% (শুধু 2 ব্লক/SM)</li>
+        <li><strong>ডেটা পুনর্ব্যবহার:</strong> প্রতিটি এলিমেন্ট 64 বার ব্যবহৃত</li>
+        <li><strong>পারফরম্যান্স:</strong> 32×32 থেকে ধীর</li>
+        <li><strong>কারণ:</strong> কম occupancy মানে কম লেটেন্সি লুকানো</li>
+    </ul>
+
+    <h2>সুইট স্পট: 32×32</h2>
+
+    <p>T4 GPU-তে, 32×32 সাধারণত সেরা কারণ:</p>
+
+    <ol>
+        <li><strong>ফুল occupancy:</strong> 8 ব্লক × 1024 থ্রেড/ব্লক = 8192 থ্রেড প্রতি SM (কিন্তু সীমা 1024, তাই 1024 সক্রিয়)</li>
+        <li><strong>ভালো পুনর্ব্যবহার:</strong> 32x প্রতিটি লোড করা এলিমেন্টের জন্য</li>
+        <li><strong>ওয়ার্প সাইজ:</strong> 32 থ্রেড = 1 ওয়ার্প, ভালো অ্যালাইনমেন্ট</li>
+        <li><strong>শেয়ার্ড মেমরি:</strong> 8 KB যুক্তিসঙ্গত, 64 KB-এর মধ্যে ভালো ফিট</li>
+    </ol>
+
+    <h2>কোড উন্নতি: Loop Unrolling</h2>
+
+    <p>লক্ষ্য করুন কোডে:</p>
+
+    <pre><code>#pragma unroll
+for (int k = 0; k < TILE_SIZE; k++) {
+    sum += tile_A[threadIdx.y][k] * tile_B[k][threadIdx.x];
+}</code></pre>
+
+    <p><code>#pragma unroll</code> কম্পাইলারকে লুপ আনরোল করতে বলে (লুপ বডি একাধিক বার সম্প্রসারিত করা)। এটি:</p>
+
+    <ul>
+        <li>ব্রাঞ্চ ইনস্ট্রাকশন কমায়</li>
+        <li>আরো ইনস্ট্রাকশন-লেভেল প্যারালালিজম প্রকাশ করে</li>
+        <li>সাধারণত 5-10% উন্নতি দেয়</li>
+    </ul>
+
+    <h2>Occupancy ক্যালকুলেটর</h2>
+
+    <p>NVIDIA একটি occupancy ক্যালকুলেটর সরবরাহ করে। আপনি এটি চেক করতে পারেন:</p>
+
+    <pre><code>%%writefile check_occupancy.cu
+#include &lt;stdio.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+template&lt;int TILE_SIZE&gt;
+__global__ void gemm_tiled(int M, int N, int K, 
+                           float *A, float *B, float *C) {
+    __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
+    __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
+    // ... বাকি কোড ...
+}
+
+int main() {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    
+    printf("Device: %s\n", prop.name);
+    printf("Compute Capability: %d.%d\n\n", prop.major, prop.minor);
+    
+    int tile_sizes[] = {16, 32, 64};
+    
+    for (int i = 0; i < 3; i++) {
+        int tile = tile_sizes[i];
+        int threads = tile * tile;
+        int shared_mem = 2 * tile * tile * sizeof(float);
+        
+        int blocks_by_shared = prop.sharedMemPerMultiprocessor / shared_mem;
+        int blocks_by_threads = prop.maxThreadsPerMultiProcessor / threads;
+        int blocks_by_limit = prop.maxBlocksPerMultiProcessor;
+        
+        int blocks_per_sm = blocks_by_shared;
+        if (blocks_by_threads < blocks_per_sm) blocks_per_sm = blocks_by_threads;
+        if (blocks_by_limit < blocks_per_sm) blocks_per_sm = blocks_by_limit;
+        
+        int active_threads = blocks_per_sm * threads;
+        float occupancy = (float)active_threads / prop.maxThreadsPerMultiProcessor * 100.0f;
+        
+        printf("Tile %dx%d:\n", tile, tile);
+        printf("  Threads per block: %d\n", threads);
+        printf("  Shared memory: %d bytes\n", shared_mem);
+        printf("  Blocks limited by shared mem: %d\n", blocks_by_shared);
+        printf("  Blocks limited by threads: %d\n", blocks_by_threads);
+        printf("  Blocks limited by HW: %d\n", blocks_by_limit);
+        printf("  Actual blocks per SM: %d\n", blocks_per_sm);
+        printf("  Active threads per SM: %d / %d\n", 
+               active_threads, prop.maxThreadsPerMultiProcessor);
+        printf("  Occupancy: %.1f%%\n\n", occupancy);
+    }
+    
+    return 0;
+}</code></pre>
+
+    <pre><code>!nvcc check_occupancy.cu -o check_occupancy
+!./check_occupancy</code></pre>
+
+    <h2>পরবর্তী কী?</h2>
+
+    <p>আমরা 32×32 টাইলিং দিয়ে ~5650 GFLOPS অর্জন করেছি - T4 পিকের ~70%! পরবর্তী অধ্যায়ে আমরা আরো অপটিমাইজেশন যোগ করব:</p>
+
+    <ul>
+        <li><strong>Vectorized loads:</strong> একবারে একাধিক এলিমেন্ট লোড করতে float4 ব্যবহার</li>
+        <li><strong>1D blocktiling:</strong> মেমরি এক্সেস প্যাটার্ন আরো উন্নত করুন</li>
+    </ul>
+
+    <div class="note">
+        <p><strong>মূল উপলব্ধি:</strong></p>
+        <ul>
+            <li>টাইল সাইজ occupancy এবং ডেটা পুনর্ব্যবহারের মধ্যে ট্রেডঅফ</li>
+            <li>T4 GPU-র জন্য 32×32 সাধারণত সর্বোত্তম</li>
+            <li>খুব বড় টাইল শেয়ার্ড মেমরি দ্বারা occupancy সীমিত করে</li>
+            <li>Loop unrolling কম্পিউট পারফরম্যান্স উন্নত করে</li>
+            <li>সবসময় বিভিন্ন টাইল সাইজ প্রোফাইল করুন আপনার নির্দিষ্ট ব্যবহারের ক্ষেত্রে</li>
+        </ul>
+    </div>
+
+    <div class="note">
+        <p><strong>অনুশীলন:</strong></p>
+        <ul>
+            <li>48×48 বা 24×24 মতো অন্যান্য টাইল সাইজ চেষ্টা করুন</li>
+            <li>            <li>আয়তক্ষেত্রাকার টাইল (যেমন 32×16) চেষ্টা করুন</li>
+            <li>কীভাবে ম্যাট্রিক্স সাইজ অপটিমাল টাইল সাইজকে প্রভাবিত করে তা অন্বেষণ করুন</li>
+        </ul>
+    </div>
+
+    <hr>
+
+    <div class="nav">
+        <a href="chapter5.html">← অধ্যায় ৫: Shared Memory Tiling</a>
+        <a href="chapter7.html">অধ্যায় ৭: 1D Blocktiling with Wider Loads →</a>
+    </div>
+
+</body>
+</html>

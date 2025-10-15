@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>অধ্যায় ৩: T4 GPU আর্কিটেকচার বোঝা - CUDA GEMM টিউটোরিয়াল</title>
+    <style>
+        body {
+            max-width: 650px;
+            margin: 40px auto;
+            padding: 0 20px;
+            font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.8;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 24px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            font-size: 20px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul, ol {
+            margin-bottom: 20px;
+            padding-left: 30px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .nav {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 40px 0;
+        }
+
+        .note {
+            background: #f9f9f9;
+            border-left: 3px solid #666;
+            padding: 10px 15px;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #f4f4f4;
+        }
+    </style>
+</head>
+<body>
+    <p><a href="index.html">← সূচিপত্রে ফিরে যান</a></p>
+
+    <h1>অধ্যায় ৩: T4 GPU আর্কিটেকচার বোঝা</h1>
+
+    <p>আমাদের naive kernel কেন ধীর? এটি বোঝার জন্য আমাদের GPU আর্কিটেকচার বুঝতে হবে। এই অধ্যায়ে আমরা NVIDIA T4 GPU-র হার্ডওয়্যার বিস্তারিতভাবে দেখব এবং শিখব কীভাবে এটি GEMM পারফরম্যান্সকে প্রভাবিত করে।</p>
+
+    <h2>T4 GPU স্পেসিফিকেশন</h2>
+
+    <p>প্রথমে T4-র মূল বৈশিষ্ট্যগুলো দেখি:</p>
+
+    <table>
+        <tr>
+            <th>বৈশিষ্ট্য</th>
+            <th>মান</th>
+        </tr>
+        <tr>
+            <td>আর্কিটেকচার</td>
+            <td>Turing</td>
+        </tr>
+        <tr>
+            <td>Streaming Multiprocessors (SMs)</td>
+            <td>40</td>
+        </tr>
+        <tr>
+            <td>CUDA Cores (মোট)</td>
+            <td>2560</td>
+        </tr>
+        <tr>
+            <td>CUDA Cores প্রতি SM</td>
+            <td>64</td>
+        </tr>
+        <tr>
+            <td>Tensor Cores</td>
+            <td>320 (8 প্রতি SM)</td>
+        </tr>
+        <tr>
+            <td>বেস ক্লক</td>
+            <td>585 MHz</td>
+        </tr>
+        <tr>
+            <td>বুস্ট ক্লক</td>
+            <td>1590 MHz</td>
+        </tr>
+        <tr>
+            <td>গ্লোবাল মেমরি (VRAM)</td>
+            <td>16 GB GDDR6</td>
+        </tr>
+        <tr>
+            <td>মেমরি ব্যান্ডউইথ</td>
+            <td>320 GB/s</td>
+        </tr>
+        <tr>
+            <td>L2 ক্যাশ</td>
+            <td>4 MB</td>
+        </tr>
+        <tr>
+            <td>শেয়ার্ড মেমরি প্রতি SM</td>
+            <td>64 KB</td>
+        </tr>
+        <tr>
+            <td>রেজিস্টার প্রতি SM</td>
+            <td>64K রেজিস্টার (256 KB)</td>
+        </tr>
+        <tr>
+            <td>সর্বোচ্চ থ্রেড প্রতি SM</td>
+            <td>1024</td>
+        </tr>
+        <tr>
+            <td>সর্বোচ্চ ব্লক প্রতি SM</td>
+            <td>16</td>
+        </tr>
+        <tr>
+            <td>FP32 পিক পারফরম্যান্স</td>
+            <td>8.1 TFLOPS</td>
+        </tr>
+    </table>
+
+    <h2>মেমরি হায়ারার্কি</h2>
+
+    <p>GPU মেমরি একটি হায়ারার্কিতে সংগঠিত - দ্রুত কিন্তু ছোট থেকে ধীর কিন্তু বড়:</p>
+
+    <h3>১. রেজিস্টার (সবচেয়ে দ্রুত)</h3>
+
+    <ul>
+        <li><strong>অবস্থান:</strong> প্রতিটি SM-এ, প্রতিটি থ্রেডের জন্য প্রাইভেট</li>
+        <li><strong>সাইজ:</strong> 256 KB প্রতি SM (64K × 32-বিট রেজিস্টার)</li>
+        <li><strong>লেটেন্সি:</strong> 1 সাইকেল</li>
+        <li><strong>ব্যান্ডউইথ:</strong> অত্যন্ত উচ্চ (প্রতি সাইকেলে অনেক অপারেশন)</li>
+        <li><strong>ব্যবহার:</strong> লোকাল ভেরিয়েবল, লুপ কাউন্টার, টেম্পোরারি</li>
+    </ul>
+
+    <p>আমাদের naive kernel-এ, <code>sum</code> ভেরিয়েবল একটি রেজিস্টারে থাকে।</p>
+
+    <h3>২. শেয়ার্ড মেমরি (অন-চিপ)</h3>
+
+    <ul>
+        <li><strong>অবস্থান:</strong> প্রতিটি SM-এ, একটি ব্লকের সব থ্রেড শেয়ার করে</li>
+        <li><strong>সাইজ:</strong> 64 KB প্রতি SM</li>
+        <li><strong>লেটেন্সি:</strong> ~20-30 সাইকেল</li>
+        <li><strong>ব্যান্ডউইথ:</strong> খুবই উচ্চ (~1-2 TB/s প্রতি SM)</li>
+        <li><strong>ব্যবহার:</strong> থ্রেডগুলোর মধ্যে ডেটা শেয়ার করা, টাইলিং</li>
+        <li><strong>প্রোগ্রামার-ম্যানেজড:</strong> আপনাকে স্পষ্টভাবে ডেটা লোড/স্টোর করতে হবে</li>
+    </ul>
+
+    <p>আমরা অধ্যায় ৫-এ এটি ব্যবহার করব!</p>
+
+    <h3>৩. L1 ক্যাশ</h3>
+
+    <ul>
+        <li><strong>অবস্থান:</strong> প্রতিটি SM-এ</li>
+        <li><strong>সাইজ:</strong> শেয়ার্ড মেমরির সাথে একই ফিজিক্যাল স্পেস শেয়ার করে</li>
+        <li><strong>লেটেন্সি:</strong> ~30 সাইকেল</li>
+        <li><strong>হার্ডওয়্যার-ম্যানেজড:</strong> স্বয়ংক্রিয় ক্যাশিং</li>
+    </ul>
+
+    <h3>৪. L2 ক্যাশ</h3>
+
+    <ul>
+        <li><strong>অবস্থান:</strong> সকল SM-এর মধ্যে শেয়ার করা</li>
+        <li><strong>সাইজ:</strong> 4 MB (মোট)</li>
+        <li><strong>লেটেন্সি:</strong> ~200 সাইকেল</li>
+        <li><strong>হার্ডওয়্যার-ম্যানেজড</strong></li>
+    </ul>
+
+    <h3>৫. গ্লোবাল মেমরি (সবচেয়ে ধীর)</h3>
+
+    <ul>
+        <li><strong>অবস্থান:</strong> GDDR6 VRAM (অফ-চিপ)</li>
+        <li><strong>সাইজ:</strong> 16 GB</li>
+        <li><strong>লেটেন্সি:</strong> ~400-800 সাইকেল</li>
+        <li><strong>ব্যান্ডউইথ:</strong> 320 GB/s (মোট)</li>
+        <li><strong>ব্যবহার:</strong> বড় ডেটা স্ট্রাকচার, ম্যাট্রিক্স</li>
+    </ul>
+
+    <p>আমাদের naive kernel-এ, A এবং B গ্লোবাল মেমরিতে থাকে এবং আমরা প্রতিটি FLOP-এর জন্য এটি থেকে পড়ি।</p>
+
+    <h2>Streaming Multiprocessor (SM)</h2>
+
+    <p>SM হলো GPU-র মূল কম্পিউটেশন ইউনিট। T4-র 40টি SM আছে, প্রতিটি স্বাধীনভাবে কাজ করে।</p>
+
+    <h3>প্রতিটি SM-এ কী আছে:</h3>
+
+    <ul>
+        <li>64টি CUDA কোর (FP32/INT32 ইউনিট)</li>
+        <li>8টি Tensor কোর (মিক্সড প্রিসিশন ম্যাট্রিক্স অপারেশনের জন্য)</li>
+        <li>64 KB শেয়ার্ড মেমরি</li>
+        <li>64K রেজিস্টার</li>
+        <li>ওয়ার্প শিডিউলার</li>
+    </ul>
+
+    <h3>ওয়ার্প: এক্সিকিউশনের ইউনিট</h3>
+
+    <p>এটি অত্যন্ত গুরুত্বপূর্ণ:</p>
+
+    <ul>
+        <li>থ্রেডগুলো স্বাধীনভাবে এক্সিকিউট হয় না</li>
+        <li>তারা <strong>ওয়ার্প</strong>-এ গ্রুপ করা হয় - 32 থ্রেড একসাথে</li>
+        <li>একটি ওয়ার্পের সকল থ্রেড একই ইনস্ট্রাকশন এক্সিকিউট করে (SIMT - Single Instruction Multiple Thread)</li>
+        <li>যদি থ্রেডগুলো ডাইভার্জ করে (বিভিন্ন ব্রাঞ্চ নেয়), ওয়ার্প সিরিয়ালি প্রতিটি পাথ এক্সিকিউট করে</li>
+    </ul>
+
+    <p>উদাহরণ: আপনি যদি 16×16=256 থ্রেডের একটি ব্লক লঞ্চ করেন, এটি 8টি ওয়ার্প (256/32)।</p>
+
+    <h2>মেমরি কোয়ালেসিং</h2>
+
+    <p>এটি আমাদের naive kernel ধীর কেন এর একটি বড় কারণ।</p>
+
+    <p>যখন একটি ওয়ার্প গ্লোবাল মেমরি থেকে পড়ে:</p>
+
+    <ul>
+        <li><strong>কোয়ালেসড এক্সেস:</strong> যদি 32টি থ্রেড পরপর 32টি ঠিকানা পড়ে, GPU একটি একক ট্রান্সাকশনে এটি করতে পারে</li>
+        <li><strong>আনকোয়ালেসড এক্সেস:</strong> যদি থ্রেডগুলো র‍্যান্ডম ঠিকানা পড়ে, GPU-কে অনেক ছোট ট্রান্সাকশন করতে হয়</li>
+    </ul>
+
+    <p>উদাহরণ:</p>
+
+    <pre><code>// কোয়ালেসড - ভালো!
+float x = array[threadIdx.x];
+
+// আনকোয়ালেসড - খারাপ!
+float x = array[threadIdx.x * 1000];</code></pre>
+
+    <p>আমাদের naive kernel-এ:</p>
+
+    <pre><code>A[row * K + k]  // কোয়ালেসড (পাশের থ্রেডগুলো পাশের সারি পড়ে)
+B[k * N + col]  // আনকোয়ালেসড! (পাশের থ্রেডগুলো N এলিমেন্ট দূরে পড়ে)</code></pre>
+
+    <h2>Occupancy এবং Latency Hiding</h2>
+
+    <p>GPU মেমরি লেটেন্সি (400-800 সাইকেল) লুকিয়ে রাখে অন্যান্য ওয়ার্প এক্সিকিউট করে।</p>
+
+    <h3>Occupancy কী?</h3>
+
+    <p>Occupancy = (সক্রিয় ওয়ার্প) / (সর্বোচ্চ সম্ভাব্য ওয়ার্প)</p>
+
+    <p>T4-তে প্রতিটি SM 32টি ওয়ার্প (1024 থ্রেড) সাপোর্ট করে। যদি আপনি শুধুমাত্র 256 থ্রেডের (8 ওয়ার্প) একটি ব্লক লঞ্চ করেন, আপনি পারেন 4টি ব্লক/SM = 32 ওয়ার্প = 100% occupancy।</p>
+
+    <h3>কী occupancy সীমিত করে:</h3>
+
+    <ul>
+        <li><strong>রেজিস্টার:</strong> যদি প্রতিটি থ্রেড অনেক রেজিস্টার ব্যবহার করে, কম থ্রেড ফিট করতে পারে</li>
+        <li><strong>শেয়ার্ড মেমরি:</strong> যদি প্রতিটি ব্লক অনেক শেয়ার্ড মেমরি ব্যবহার করে, কম ব্লক ফিট করতে পারে</li>
+        <li><strong>ব্লক সাইজ:</strong> খুব ছোট ব্লক = সম্পদ নষ্ট, খুব বড় ব্লক = কম ব্লক ফিট করে</li>
+    </ul>
+
+    <p>উচ্চ occupancy সাধারণত ভালো (আরো লেটেন্সি লুকানো), কিন্তু এটি একমাত্র ফ্যাক্টর নয়!</p>
+
+    <h2>আমরা কীভাবে আমাদের Kernel পারফরম্যান্স ক্যালকুলেট করতে পারি?</h2>
+
+    <p>আসুন আমাদের naive kernel বিশ্লেষণ করি (512×512 ম্যাট্রিক্স):</p>
+
+    <h3>Compute:</h3>
+
+    <ul>
+        <li>মোট FLOP: 2 × 512 × 512 × 512 = 268M</li>
+        <li>প্রতিটি থ্রেড: 2 × 512 = 1024 FLOP</li>
+        <li>মোট থ্রেড: 512 × 512 = 262,144</li>
+    </ul>
+
+    <h3>মেমরি:</h3>
+
+    <ul>
+        <li>প্রতিটি FLOP 2টি float পড়ে (A এবং B থেকে একটি) = 8 বাইট</li>
+        <li>মোট পড়া: 268M × 8 = 2.14 GB</li>
+        <li>320 GB/s ব্যান্ডউইথ এ = 6.7ms (শুধুমাত্র মেমরি!)</li>
+    </ul>
+
+    <h3>Arithmetic Intensity:</h3>
+
+    <pre><code>Arithmetic Intensity = FLOP / Bytes Read
+                     = 268M / 2.14 GB
+                     = 0.125 FLOP/byte</code></pre>
+
+    <p>এটি খুবই কম! উচ্চ-পারফরম্যান্স GEMM ~10-20 FLOP/byte চায়।</p>
+
+    <h2>আমাদের Kernel কেন ধীর: সারসংক্ষেপ</h2>
+
+    <ol>
+        <li><strong>কম arithmetic intensity:</strong> আমরা প্রতিটি FLOP-এর জন্য অনেক ডেটা পড়ি</li>
+        <li><strong>কোন ডেটা পুনর্ব্যবহার নেই:</strong> A এবং B-এর এলিমেন্ট বারবার গ্লোবাল মেমরি থেকে পড়া হয়</li>
+        <li><strong>আনকোয়ালেসড এক্সেস:</strong> B-এর stride এক্সেস খারাপ ব্যান্ডউইথ</li>
+        <li><strong>উচ্চ লেটেন্সি:</strong> গ্লোবাল মেমরি ধীর, এবং আমরা এটি প্রায়শই হিট করি</li>
+    </ol>
+
+    <h2>GPU স্পেসিফিকেশন দেখা</h2>
+
+    <p>চলুন Colab-এ আমাদের T4-র স্পেসিফিকেশন যাচাই করি:</p>
+
+    <pre><code>%%writefile query_device.cu
+#include &lt;stdio.h&gt;
+
+int main() {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    
+    printf("Device: %s\n", prop.name);
+    printf("Compute Capability: %d.%d\n", prop.major, prop.minor);
+    printf("\n=== Compute Resources ===\n");
+    printf("Multiprocessors (SMs): %d\n", prop.multiProcessorCount);
+    printf("CUDA Cores per SM: %d\n", 
+           prop.major >= 7 ? 64 : 128);
+    printf("Total CUDA Cores: %d\n", 
+           prop.multiProcessorCount * (prop.major >= 7 ? 64 : 128));
+    printf("Max threads per SM: %d\n", prop.maxThreadsPerMultiProcessor);
+    printf("Max threads per block: %d\n", prop.maxThreadsPerBlock);
+    printf("Max blocks per SM: %d\n", 
+           prop.maxThreadsPerMultiProcessor / prop.maxThreadsPerBlock);
+    
+    printf("\n=== Memory Hierarchy ===\n");
+    printf("Global memory: %.2f GB\n", 
+           prop.totalGlobalMem / 1e9);
+    printf("L2 cache: %.2f MB\n", prop.l2CacheSize / 1e6);
+    printf("Shared memory per block: %.2f KB\n", 
+           prop.sharedMemPerBlock / 1e3);
+    printf("Shared memory per SM: %.2f KB\n", 
+           prop.sharedMemPerMultiprocessor / 1e3);
+    printf("Registers per block: %d\n", prop.regsPerBlock);
+    printf("Registers per SM: %d\n", prop.regsPerMultiprocessor);
+    
+    printf("\n=== Memory Bandwidth ===\n");
+    printf("Memory clock: %d MHz\n", prop.memoryClockRate / 1000);
+    printf("Memory bus width: %d bits\n", prop.memoryBusWidth);
+    printf("Peak bandwidth: %.1f GB/s\n", 
+           2.0 * prop.memoryClockRate * (prop.memoryBusWidth / 8) / 1e6);
+    
+    printf("\n=== Warp Info ===\n");
+    printf("Warp size: %d\n", prop.warpSize);
+    printf("Max warps per SM: %d\n", 
+           prop.maxThreadsPerMultiProcessor / prop.warpSize);
+    
+    return 0;
+}</code></pre>
+
+    <p>কম্পাইল এবং রান:</p>
+
+    <pre><code>!nvcc query_device.cu -o query_device
+!./query_device</code></pre>
+
+    <p>আউটপুট T4-র সঠিক স্পেসিফিকেশন দেখাবে।</p>
+
+    <h2>পরবর্তী কী?</h2>
+
+    <p>এখন আমরা বুঝি GPU আর্কিটেকচার এবং কেন আমাদের naive kernel ধীর। পরবর্তী অধ্যায়ে আমরা আমাদের প্রথম অপটিমাইজেশন করব: <strong>coalesced memory access</strong>। আমরা পুনর্গঠন করব কীভাবে আমরা মেমরি থেকে পড়ি যাতে GPU এর মেমরি সিস্টেম দক্ষতার সাথে কাজ করে।</p>
+
+    <div class="note">
+        <p><strong>মূল উপলব্ধি:</strong></p>
+        <ul>
+            <li>GPU মেমরি একটি হায়ারার্কি: রেজিস্টার (দ্রুত) → শেয়ার্ড → L1 → L2 → গ্লোবাল (ধীর)</li>
+            <li>থ্রেডগুলো 32-এর ওয়ার্পে এক্সিকিউট হয়</li>
+            <li>মেমরি কোয়ালেসিং গুরুত্বপূর্ণ - ধারাবাহিক এক্সেস দ্রুত</li>
+            <li>Occupancy লেটেন্সি লুকাতে সাহায্য করে</li>
+            <li>Arithmetic intensity গুরুত্বপূর্ণ - আমরা ডেটা পুনর্ব্যবহার করতে চাই</li>
+        </ul>
+    </div>
+
+    <div class="nav">
+        <a href="chapter2.html">← অধ্যায় ২</a>
+        <a href="chapter4.html">অধ্যায় ৪: Coalesced Memory Access →</a>
+    </div>
+
+</body>
+</html>

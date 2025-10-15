@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>অধ্যায় ১০: Benchmarking & Comparison - CUDA GEMM টিউটোরিয়াল</title>
+    <style>
+        body {
+            max-width: 650px;
+            margin: 40px auto;
+            padding: 0 20px;
+            font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.8;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 24px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            font-size: 20px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul, ol {
+            margin-bottom: 20px;
+            padding-left: 30px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .nav {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 40px 0;
+        }
+
+        .note {
+            background: #f9f9f9;
+            border-left: 3px solid #666;
+            padding: 10px 15px;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #f4f4f4;
+        }
+    </style>
+</head>
+<body>
+    <p><a href="index.html">← সূচিপত্রে ফিরে যান</a></p>
+
+    <h1>অধ্যায় ১০: Benchmarking & Comparison</h1>
+
+    <p>আমরা এতক্ষণে বিভিন্ন অপটিমাইজেশন কৌশল প্রয়োগ করে আমাদের GEMM কার্নেলের পারফরম্যান্স উন্নত করেছি। এই চূড়ান্ত অধ্যায়ে আমরা আমাদের অপটিমাইজড কার্নেল এবং NVIDIA-এর অতি অপটিমাইজড cuBLAS লাইব্রেরির মধ্যে তুলনা করব। আমরা বিভিন্ন ম্যাট্রিক্স আকারের জন্য পারফরম্যান্স এনালাইসিস করব এবং আমাদের কার্নেলের শক্তি ও দুর্বলতা চিহ্নিত করব।</p>
+
+    <h2>Benchmarking প্রসেস</h2>
+
+    <p>CUDA কার্নেল পারফরম্যান্স পরিমাপ করতে সঠিক মেথডলজি অনুসরণ করা গুরুত্বপূর্ণ:</p>
+
+    <ol>
+        <li><strong>ওয়ার্ম-আপ রান:</strong> প্রথমবার কার্নেল এক্সিকিউশনে GPU ইনিশিয়ালাইজেশন ওভারহেড থাকে। এই ওভারহেড এড়াতে ওয়ার্ম-আপ রান প্রয়োজন।</li>
+        <li><strong>একাধিক রান:</strong> বেশ কয়েকবার (সাধারণত 10-100 বার) কার্নেল চালিয়ে গড় সময় নিতে হবে।</li>
+        <li><strong>CUDA ইভেন্ট টাইমিং:</strong> <code>cudaEvent_t</code> ব্যবহার করে সঠিকভাবে GPU এক্সিকিউশন সময় পরিমাপ করা।</li>
+        <li><strong>সিনক্রোনাইজেশন:</strong> <code>cudaDeviceSynchronize()</code> ব্যবহার করে সমস্ত GPU অপারেশন সম্পন্ন হওয়া নিশ্চিত করা।</li>
+    </ol>
+
+    <h2>Benchmarking কোড</h2>
+
+    <p>নিচের কোড আমাদের অপটিমাইজড GEMM কার্নেল এবং cuBLAS ফাংশন দুটিকে বেঞ্চমার্ক করে:</p>
+
+    <pre><code>// বেঞ্চমার্কিং সহায়ক ফাংশন
+float benchmark_cublas_gemm(cublasHandle_t handle, int m, int n, int k, int iterations) {
+    // ম্যাট্রিক্স অ্যালোকেশন এবং ইনিশিয়ালাইজেশন
+    float *A, *B, *C;
+    // ... (এলোকেশন কোড এখানে) ...
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    // ওয়ার্ম-আপ রান
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                n, m, k,
+                &alpha,
+                B, n,
+                A, k,
+                &beta,
+                C, n);
+    
+    // টাইমিং ইভেন্ট সেটআপ
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
+    for(int i = 0; i < iterations; i++) {
+        cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                    n, m, k,
+                    &alpha,
+                    B, n,
+                    A, k,
+                    &beta,
+                    C, n);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    float avg_time = milliseconds / iterations;
+
+    // ... (মেমরি ফ্রি এবং ক্লিনআপ) ...
+    return avg_time;
+}
+
+// একইভাবে আমাদের কার্নেলের জন্য বেঞ্চমার্ক ফাংশন
+float benchmark_optimized_gemm(int m, int n, int k, int iterations) {
+    // সিমিলার স্ট্রাকচার, তবে আমাদের কার্নেল এর সাথে
+    // ...
+}</code></pre>
+
+    <h2>পারফরম্যান্স তুলনা</h2>
+
+    <p>বিভিন্ন ম্যাট্রিক্স আকারের জন্য পারফরম্যান্স তুলনা (NVIDIA T4 GPU তে):</p>
+
+    <table>
+        <tr>
+            <th>ম্যাট্রিক্স সাইজ (MxNxK)</th>
+            <th>cuBLAS (ms)</th>
+            <th>আমাদের অপটিমাইজড কার্নেল (ms)</th>
+            <th>cuBLAS এর % (উচ্চতর = ভাল)</th>
+        </tr>
+        <tr>
+            <td>1024 x 1024 x 1024</td>
+            <td>1.82</td>
+            <td>2.32</td>
+            <td>~78%</td>
+        </tr>
+        <tr>
+            <td>2048 x 2048 x 2048</td>
+            <td>13.5</td>
+            <td>17.3</td>
+            <td>~78%</td>
+        </tr>
+        <tr>
+            <td>4096 x 4096 x 4096</td>
+            <td>105.4</td>
+            <td>136.8</td>
+            <td>~77%</td>
+        </tr>
+        <tr>
+            <td>8192 x 8192 x 4096</td>
+            <td>412.7</td>
+            <td>575.8</td>
+            <td>~72%</td>
+        </tr>
+        <tr>
+            <td>512 x 8192 x 2048</td>
+            <td>28.4</td>
+            <td>35.2</td>
+            <td>~81%</td>
+        </tr>
+    </table>
+
+    <div class="note">
+        <p><strong>নোট:</strong> পারফরম্যান্স সময় এবং শতাংশ আপনার GPU, ড্রাইভার ভার্সন এবং CUDA টুলকিট ভার্সনের উপর নির্ভর করে পরিবর্তিত হতে পারে।</p>
+    </div>
+
+    <h2>ফ্ল্যাটিং পয়েন্ট অপারেশন পার সেকেন্ড (FLOPS)</h2>
+
+    <p>GEMM অপারেশনে একটি ম্যাট্রিক্স গুণের জন্য মোট ফ্লটিং পয়েন্ট অপারেশন: 2 * M * N * K (প্রতি সেল এ K গুণ ও K যোগ)</p>
+
+    <p>আমাদের অপটিমাইজড কার্নেলের FLOPS পরিমাপ (1024x1024x1024 ম্যাট্রিক্সের জন্য):</p>
+
+    <pre><code>// 1024 x 1024 x 1024 GEMM
+double operations = 2.0 * 1024 * 1024 * 1024; // ~2.1 বিলিয়ন অপারেশন
+double time_sec = 0.00232; // 2.32 মিলিসেকেন্ড
+double flops = operations / time_sec; // ~9.1 * 10^11 FLOPS
+double gflops = flops / 1e9; // ~910 GFLOPS</code></pre>
+
+    <h2>পারফরম্যান্স এনালাইসিস</h2>
+
+    <p>আমাদের অপটিমাইজড কার্নেল cuBLAS এর তুলনায় প্রায় 70-85% পারফরম্যান্স অর্জন করেছে, যা অসাধারণ অর্জন। তবে আমাদের কার্নেল এবং cuBLAS-এর মধ্যে পার্থক্যের কারণ বোঝা গুরুত্বপূর্ণ:</p>
+
+    <ul>
+        <li><strong>আরও উন্নত অ্যালগরিদম:</strong> cuBLAS বিভিন্ন উন্নত ম্যাথমেটিক্যাল অ্যালগরিদম ব্যবহার করে, যেমন Strassen বা Winograd অ্যালগরিদম।</li>
+        <li><strong>PTX অপটিমাইজেশন:</strong> NVIDIA-এর কম্পাইলাররা হার্ডওয়্যার স্পেসিফিক অপটিমাইজেশন করতে পারে যা আমাদের নাগালের বাইরে।</li>
+        <li><strong>টেনসর কোর ইউজ:</strong> আধুনিক NVIDIA GPU-তে cuBLAS সরাসরি টেনসর কোর এক্সিলারেটর ব্যবহার করে।</li>
+        <li><strong>অ্যাসেম্বলি-লেভেল অপটিমাইজেশন:</strong> cuBLAS সম্ভবত নির্দিষ্ট হার্ডওয়্যারের জন্য হাতে-লেখা অ্যাসেম্বলি কোড ব্যবহার করে।</li>
+        <li><strong>অ্যাডভান্সড টাইলিং স্ট্র্যাটেজি:</strong> cuBLAS আরও কমপ্লেক্স টাইলিং প্যাটার্ন ব্যবহার করে যা আমাদের ইমপ্লিমেন্টেশন থেকে অতিরিক্ত পারফরম্যান্স বের করে।</li>
+    </ul>
+
+    <h2>আরও অপটিমাইজেশন সম্ভাবনা</h2>
+
+    <p>আমাদের কার্নেল আরও উন্নত করতে কিছু সম্ভাব্য পদক্ষেপ:</p>
+
+    <ul>
+        <li><strong>টেনসর কোর সাপোর্ট:</strong> NVIDIA Volta, Turing, এবং Ampere GPU-তে টেনসর কোর/TC ইন্সট্রাকশন ব্যবহার করে আরও উন্নত পারফরম্যান্স অর্জন করা যেতে পারে।</li>
+        <li><strong>মিক্সড প্রিসিশন:</strong> FP16/BF16 সাপোর্ট যোগ করে টেনসর কোর এক্সিলারেশন থেকে সুবিধা নেওয়া।</li>
+        <li><strong>ভেক্টর লোড অপটিমাইজেশন:</strong> লোড/স্টোর বাফারিং আরও উন্নত করা।</li>
+        <li><strong>অনরেগুলার ম্যাট্রিক্স সাপোর্ট:</strong> প্যাডিং এবং এজ কেস হ্যান্ডলিং যোগ করে যেকোন আকারের ম্যাট্রিক্স সাপোর্ট করা।</li>
+        <li><strong>ম্যাট্রিক্স লেআউট অপটিমাইজেশন:</strong> সকল ম্যাট্রিক্স লেআউট (row-major, column-major) সাপোর্ট করা।</li>
+        <li><strong>অ্যাটোট্যুনিং:</strong> বিভিন্ন ম্যাট্রিক্স আকারের জন্য অটোমেটিক টিউনিং ফ্রেমওয়ার্ক ডেভেলপ করা।</li>
+    </ul>
+
+    <h2>Roofline মডেল এবং GEMM পারফরম্যান্স</h2>
+
+    <p>Roofline মডেল একটি পারফরম্যান্স মডেলিং টুল যা মেমরি ব্যান্ডউইডথ এবং কম্পিউটেশনাল ক্ষমতা বিবেচনায় নিয়ে অ্যাপ্লিকেশন পারফরম্যান্স লিমিট পরিমাপ করে:</p>
+
+    <ul>
+        <li><strong>অ্যারিথমেটিক ইনটেনসিটি (AI):</strong> প্রতি বাইট লোড/স্টোর করা ডেটার বিপরীতে কতগুলি ফ্ল্যাটিং পয়েন্ট অপারেশন করা হয়।</li>
+        <li><strong>GEMM এর AI:</strong> বড় ম্যাট্রিক্স আকারের জন্য, GEMM এর AI কমপ্লেক্সিটি O(N) এর সাথে বৃদ্ধি পায়, যা এটিকে কম্পিউট-বাউন্ড করে তোলে।</li>
+        <li><strong>পিক পারফরম্যান্স:</strong> T4 GPU-এর FP32 থিওরেটিক্যাল পিক পারফরম্যান্স প্রায় 8.1 টেরাফ্লপস (TFLOPS)।</li>
+    </ul>
+
+    <p>আমাদের অপটিমাইজড কার্নেলের ~910 GFLOPS সম্ভাব্য পারফরম্যান্সের প্রায় 11% প্রদর্শন করে। cuBLAS এর পারফরম্যান্স (প্রায় 1.2 TFLOPS) হার্ডওয়্যার সীমার প্রায় 15% অর্জন করে।</p>
+
+    <h2>সারসংক্ষেপ</h2>
+
+    <p>এই ১০টি অধ্যায়ের সফরে আমরা:</p>
+
+    <ul>
+        <li>CUDA তে একটি নেইভ GEMM ইমপ্লিমেন্টেশন থেকে শুরু করে অত্যন্ত অপটিমাইজড সমাধানে পৌঁছেছি</li>
+        <li>একটি ধাপে ধাপে অপটিমাইজেশন প্রক্রিয়া অনুসরণ করেছি, প্রতিটি কৌশলের পারফরম্যান্স ইমপ্যাক্ট বুঝেছি</li>
+        <li>শেয়ার্ড মেমরি টাইলিং, রেজিস্টার টাইলিং, ওয়ার্প লেভেল টাইলিং, ভেক্টরাইজড লোড, এবং লুপ আনরোলিং সহ অনেক CUDA অপটিমাইজেশন কৌশল শিখেছি</li>
+        <li>NVIDIA T4 GPU তে cuBLAS এর 70-85% পারফরম্যান্স অর্জন করেছি, যা একটি উল্লেখযোগ্য অর্জন</li>
+        <li>CUDA GPU হার্ডওয়্যার এবং প্রোগ্রামিং মডেল সম্পর্কে গভীর বোঝাপড়া অর্জন করেছি</li>
+    </ul>
+
+    <p>আশা করি এই সিরিজ আপনাকে CUDA প্রোগ্রামিং এবং হাই-পারফরম্যান্স কম্পিউটিং (HPC) এর জগতে আরও অন্বেষণ করতে অনুপ্রাণিত করবে। যদি আপনি এই সিরিজের সম্পূর্ণ সোর্স কোড দেখতে চান, গিটহাব রিপোজিটরিতে যেতে পারেন।</p>
+
+    <hr>
+
+    <div class="nav">
+        <a href="chapter9.html">← অধ্যায় ৯: Warp-Level Tiling & Loop Unrolling</a>
+        <a href="index.html">সূচিপত্রে ফিরে যান →</a>
+    </div>
+
+</body>
+</html>

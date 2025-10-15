@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>অধ্যায় ৯: Warp-Level Tiling & Loop Unrolling - CUDA GEMM টিউটোরিয়াল</title>
+    <style>
+        body {
+            max-width: 650px;
+            margin: 40px auto;
+            padding: 0 20px;
+            font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.8;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 24px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            font-size: 20px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul, ol {
+            margin-bottom: 20px;
+            padding-left: 30px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .nav {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 40px 0;
+        }
+
+        .note {
+            background: #f9f9f9;
+            border-left: 3px solid #666;
+            padding: 10px 15px;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #f4f4f4;
+        }
+    </style>
+</head>
+<body>
+    <p><a href="index.html">← সূচিপত্রে ফিরে যান</a></p>
+
+    <h1>অধ্যায় ৯: Warp-Level Tiling & Loop Unrolling</h1>
+
+    <p>এই অধ্যায়ে আমরা দুটি উন্নত অপটিমাইজেশন টেকনিক অধ্যয়ন করব: ওয়ার্প-লেভেল টাইলিং (warp-level tiling) এবং লুপ আনরোলিং (loop unrolling)। এই কৌশলগুলি আমাদের কোডে ইন্সট্রাকশন থ্রুপুট এবং মেমরি এক্সেস প্যাটার্ন আরও উন্নত করবে। সম্পূর্ণ ইমপ্লিমেন্টেশন ~60-70x স্পিডআপ দিতে পারে আমাদের প্রাথমিক কোড থেকে।</p>
+
+    <h2>ওয়ার্প কী?</h2>
+
+    <p>CUDA তে একটি ওয়ার্প (warp) হল 32টি থ্রেডের একটি গ্রুপ যা একসাথে সিঙ্ক্রোনাসলি এক্সিকিউট হয়। ওয়ার্প-অভ্যন্তরীণ অপারেশন খুব দক্ষ কারণ:</p>
+
+    <ul>
+        <li>ওয়ার্পের সব থ্রেড একই ইন্সট্রাকশন একই সময়ে এক্সিকিউট করে (SIMT মডেল)</li>
+        <li>একটি ওয়ার্পের ভিতরে <code>__syncthreads()</code> প্রয়োজন হয় না (স্বাভাবিকভাবেই সিঙ্ক্রোনাইজড)</li>
+        <li>ওয়ার্প শাফল ইন্সট্রাকশন (<code>__shfl_sync()</code>) ব্যবহার করে থ্রেডগুলি রেজিস্টারের মাধ্যমে ডেটা শেয়ার করতে পারে</li>
+    </ul>
+
+    <h2>ওয়ার্প-লেভেল টাইলিং</h2>
+
+    <p>ওয়ার্প-লেভেল টাইলিং এ, আমরা ওয়ার্প আকারের সাথে সঙ্গতিপূর্ণভাবে আমাদের কম্পিউটেশন সংগঠিত করি:</p>
+
+    <ul>
+        <li>একটি ওয়ার্পের সব থ্রেড (32) একটি ব্লক আউটপুট কম্পিউট করে</li>
+        <li>মেমরি লোড একত্রিত (coalesced) হয় যাতে ওয়ার্প একসাথে স্ট্রাইড ছাড়া মেমরি এক্সেস করে</li>
+        <li>ওয়ার্প শাফল ইন্সট্রাকশন (<code>__shfl_sync()</code>) ব্যবহার করে রেজিস্টারের মাধ্যমে ডেটা শেয়ার করা যায়</li>
+    </ul>
+
+    <h2>লুপ আনরোলিং</h2>
+
+    <p>লুপ আনরোলিং (loop unrolling) হল একটি কম্পাইলার অপটিমাইজেশন কৌশল যেখানে লুপের বডি একাধিকবার কপি করে লুপের ইটারেশন কমানো হয়। এর ফায়দা:</p>
+
+    <ul>
+        <li>লুপ কন্ট্রোল ওভারহেড কমানো (ইন্ডেক্স বৃদ্ধি, শর্ত পরীক্ষা)</li>
+        <li>ইন্সট্রাকশন প্যারালেলিজম বৃদ্ধি</li>
+        <li>রেজিস্টার রিইউজ সুযোগ বৃদ্ধি</li>
+        <li>কম্পাইলারের অন্যান্য অপটিমাইজেশন সক্ষম করা</li>
+    </ul>
+
+    <p>লুপ আনরোলিং দুভাবে করা যায়:</p>
+    <ol>
+        <li>ম্যানুয়ালি - কোডে স্পষ্টভাবে লুপ বডি বারবার লিখে</li>
+        <li>কম্পাইলার দিয়ে - <code>#pragma unroll</code> বা কম্পাইলার অপশন ব্যবহার করে</li>
+    </ol>
+
+    <h2>সম্পূর্ণ কোড ইমপ্লিমেন্টেশন</h2>
+
+    <pre><code>%%writefile gemm_warp_tiled.cu
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+// ওয়ার্প সাইজ (fixed in CUDA)
+#define WARP_SIZE 32
+
+// টাইল পরিমাপ
+#define TILE_SIZE 128
+#define WARP_TILE_M 32  // ওয়ার্প প্রতি M-ডাইমেনশন টাইল সাইজ
+#define WARP_TILE_N 64  // ওয়ার্প প্রতি N-ডাইমেনশন টাইল সাইজ
+
+// থ্রেড ব্লক আউটপুট
+#define THREAD_TILE_M 8  // প্রতি থ্রেড M-ডাইমেনশন আউটপুট সাইজ
+#define THREAD_TILE_N 8  // প্রতি থ্রেড N-ডাইমেনশন আউটপুট সাইজ
+
+// ওয়ার্প-লেভেল টাইলিং এবং লুপ আনরোলিং ব্যবহার করে কার্নেল
+__global__ void gemm_warp_tiled(int M, int N, int K, 
+                               float *A, float *B, float *C) {
+    // শেয়ার্ড মেমরি টাইল
+    __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
+    __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
+    
+    // থ্রেড এবং ওয়ার্প আইডি
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    int warpId = tid / WARP_SIZE;
+    int laneId = tid % WARP_SIZE;
+    
+    // ওয়ার্প-এর অবস্থান
+    int warp_row = warpId / (TILE_SIZE/WARP_TILE_M);
+    int warp_col = warpId % (TILE_SIZE/WARP_TILE_N);
+    
+    // থ্রেডের অবস্থান ওয়ার্পের ভিতরে
+    int lane_row = (laneId / (WARP_TILE_N/THREAD_TILE_N));
+    int lane_col = (laneId % (WARP_TILE_N/THREAD_TILE_N));
+    
+    // মূল আউটপুট ইনডেক্স
+    int row = blockIdx.y * TILE_SIZE + warp_row * WARP_TILE_M + lane_row * THREAD_TILE_M;
+    int col = blockIdx.x * TILE_SIZE + warp_col * WARP_TILE_N + lane_col * THREAD_TILE_N;
+    
+    // রেজিস্টারে আউটপুট সঞ্চয় করুন
+    float sum[THREAD_TILE_M][THREAD_TILE_N] = {0.0f};
+    
+    // টাইলের উপর লুপ করুন
+    for (int tile_idx = 0; tile_idx < (K + TILE_SIZE - 1) / TILE_SIZE; ++tile_idx) {
+        // থ্রেড মেমরি এক্সেস প্যাটার্ন অপটিমাইজেশন
+        // প্রতি থ্রেড একাধিক এলিমেন্ট লোড করে
+        for (int i = tid; i < TILE_SIZE * TILE_SIZE; i += blockDim.x * blockDim.y) {
+            int tile_row = i / TILE_SIZE;
+            int tile_col = i % TILE_SIZE;
+            
+            // গ্লোবাল মেমরি ইনডেক্স
+            int a_row = blockIdx.y * TILE_SIZE + tile_row;
+            int a_col = tile_idx * TILE_SIZE + tile_col;
+            int b_row = tile_idx * TILE_SIZE + tile_row;
+            int b_col = blockIdx.x * TILE_SIZE + tile_col;
+            
+            // কন্ডিশনাল লোডিং
+            if (a_row < M && a_col < K) {
+                tile_A[tile_row][tile_col] = A[a_row * K + a_col];
+            } else {
+                tile_A[tile_row][tile_col] = 0.0f;
+            }
+            
+            if (b_row < K && b_col < N) {
+                tile_B[tile_row][tile_col] = B[b_row * N + b_col];
+            } else {
+                tile_B[tile_row][tile_col] = 0.0f;
+            }
+        }
+        
+        // সব থ্রেড লোডিং শেষ হওয়ার জন্য অপেক্ষা করুন
+        __syncthreads();
+        
+        // K-ডাইমেনশন লুপ আনরোল করুন (#pragma unroll)
+        #pragma unroll 8
+        for (int k = 0; k < TILE_SIZE; ++k) {
+            // M-ডাইমেনশন লুপ আনরোল করুন
+            #pragma unroll
+            for (int m = 0; m < THREAD_TILE_M; ++m) {
+                // A থেকে ডেটা একবার লোড করুন
+                float a_val = tile_A[warp_row * WARP_TILE_M + lane_row * THREAD_TILE_M + m][k];
+                
+                // N-ডাইমেনশন লুপ আনরোল করুন
+                #pragma unroll
+                for (int n = 0; n < THREAD_TILE_N; ++n) {
+                    // B থেকে ডেটা একবার লোড করুন
+                    float b_val = tile_B[k][warp_col * WARP_TILE_N + lane_col * THREAD_TILE_N + n];
+                    
+                    // রেজিস্টারে আংশিক যোগফল সঞ্চয় করুন
+                    sum[m][n] += a_val * b_val;
+                }
+            }
+        }
+        
+        // পরবর্তী টাইল লোড করার আগে সব থ্রেড শেষ হওয়ার জন্য অপেক্ষা করুন
+        __syncthreads();
+    }
+    
+    // রেজাল্ট লিখুন - আনরোল করুন যাতে যথাসম্ভব কোলেস্ড স্টোর হয়
+    #pragma unroll
+    for (int m = 0; m < THREAD_TILE_M; ++m) {
+        int global_row = row + m;
+        if (global_row < M) {
+            #pragma unroll
+            for (int n = 0; n < THREAD_TILE_N; ++n) {
+                int global_col = col + n;
+                if (global_col < N) {
+                    C[global_row * N + global_col] = sum[m][n];
+                }
+            }
+        }
+    }
+}
+
+int main() {
+    int M = 2048;
+    int N = 2048;
+    int K = 2048;
+    
+    printf("Matrix dimensions: C(%dx%d) = A(%dx%d) * B(%dx%d)\n", 
+           M, N, M, K, K, N);
+    
+    // Host মেমরি
+    size_t bytes_A = M * K * sizeof(float);
+    size_t bytes_B = K * N * sizeof(float);
+    size_t bytes_C = M * N * sizeof(float);
+    
+    float *h_A = (float*)malloc(bytes_A);
+    float *h_B = (float*)malloc(bytes_B);
+    float *h_C = (float*)malloc(bytes_C);
+    
+    // ইনিশিয়ালাইজ
+    for (int i = 0; i < M * K; i++) h_A[i] = rand() / (float)RAND_MAX;
+    for (int i = 0; i < K * N; i++) h_B[i] = rand() / (float)RAND_MAX;
+    
+    // Device মেমরি
+    float *d_A, *d_B, *d_C;
+    cudaMalloc(&d_A, bytes_A);
+    cudaMalloc(&d_B, bytes_B);
+    cudaMalloc(&d_C, bytes_C);
+    
+    cudaMemcpy(d_A, h_A, bytes_A, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, bytes_B, cudaMemcpyHostToDevice);
+    
+    // গ্রিড এবং ব্লক সেটআপ - ওয়ার্প সংখ্যা এবং ব্লক কনফিগারেশন অপটিমাইজ করা
+    int warps_per_block = 8;  // SM প্রতি ওয়ার্প সংখ্যা বেস্ট প্র্যাকটিস
+    dim3 threads(WARP_SIZE, warps_per_block);
+    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+    
+    printf("\n=== Warp-Level Tiling & Loop Unrolling ===\n");
+    printf("Tile Size: %d x %d\n", TILE_SIZE, TILE_SIZE);
+    printf("Warp Tile: %d x %d\n", WARP_TILE_M, WARP_TILE_N);
+    printf("Thread Tile: %d x %d (outputs per thread)\n", THREAD_TILE_M, THREAD_TILE_N);
+    printf("Each thread computes %d outputs\n", THREAD_TILE_M * THREAD_TILE_N);
+    
+    // কার্নেল রান করুন
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    // ওয়ার্মআপ
+    gemm_warp_tiled<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    cudaDeviceSynchronize();
+    
+    // বেঞ্চমার্ক
+    cudaEventRecord(start);
+    for (int i = 0; i < 10; i++) {
+        gemm_warp_tiled<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    milliseconds /= 10.0f;
+    
+    double gflops = (2.0 * M * N * K) / (milliseconds / 1000.0) / 1e9;
+    
+    printf("Time: %.3f ms\n", milliseconds);
+    printf("GFLOPS: %.2f\n", gflops);
+    printf("Peak Performance: %.1f%%\n", gflops / 8100.0 * 100);
+    
+    // রেজাল্ট কপি করে আনুন
+    cudaMemcpy(h_C, d_C, bytes_C, cudaMemcpyDeviceToHost);
+    
+    // ক্লিনআপ
+    free(h_A);
+    free(h_B);
+    free(h_C);
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+    
+    return 0;
+}</code></pre>
+
+    <h2>মূল অপটিমাইজেশন কৌশলগুলি</h2>
+
+    <h3>1. ওয়ার্প-লেভেল টাইলিং</h3>
+    <p>একটি ওয়ার্প (32 থ্রেড) একসাথে কাজ করে একটি উপ-ম্যাট্রিক্স কম্পিউট করে। থ্রেড ব্লকে সব থ্রেড ওয়ার্প অনুযায়ী সাজানো হয়:</p>
+
+    <pre><code>int tid = threadIdx.y * blockDim.x + threadIdx.x;
+int warpId = tid / WARP_SIZE;
+int laneId = tid % WARP_SIZE;</code></pre>
+
+    <h3>2. লুপ আনরোলিং</h3>
+    <p>কম্পাইলার ডিরেকটিভ ব্যবহার করে আমরা লুপগুলো আনরোল করছি:</p>
+
+    <pre><code>#pragma unroll 8
+for (int k = 0; k < TILE_SIZE; ++k) {
+    // আনরোল লুপ বডি...
+}</code></pre>
+
+    <p>এটি লুপ বডি 8 বার কপি করে বিস্তৃত করবে, লুপ ওভারহেড কমাবে এবং পাইপলাইন বেটার ফিল করবে।</p>
+
+    <h3>3. রেজিস্টার রিইউজ</h3>
+    <p>প্রতি থ্রেড একটি বড় সাবটাইল (8x8 এলিমেন্ট) কম্পিউট করে এবং রেজাল্ট রেজিস্টারে রাখে:</p>
+
+    <pre><code>float sum[THREAD_TILE_M][THREAD_TILE_N] = {0.0f};</code></pre>
+
+    <p>এটি শেয়ার্ড মেমরি থেকে প্রতিটি লোড অধিক কম্পিউটেশন সম্পন্ন করতে সাহায্য করে, অ্যারিথমেটিক ইনটেনসিটি বাড়ায়।</p>
+
+    <h3>4. কোলেস্ড মেমরি এক্সেস</h3>
+    <p>মেমরি এক্সেস কোলেস্ড করা হয়েছে যাতে একটি ওয়ার্প একসাথে একটি কনটিগুয়াস ব্লক এক্সেস করতে পারে:</p>
+
+    <pre><code>for (int i = tid; i < TILE_SIZE * TILE_SIZE; i += blockDim.x * blockDim.y) {
+    int tile_row = i / TILE_SIZE;
+    int tile_col = i % TILE_SIZE;
+    
+    // কোলেস্ড লোড...
+}</code></pre>
+
+    <h2>পারফরম্যান্স বিশ্লেষণ</h2>
+
+    <p>একটি T4 GPU তে ওয়ার্প-লেভেল টাইলিং এবং লুপ আনরোলিং এর ফলাফল:</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ইমপ্লিমেন্টেশন</th>
+                <th>টাইম (ms)</th>
+                <th>GFLOPS</th>
+                <th>স্পিডআপ</th>
+                <th>পিক %</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>2D Blocktiling</td>
+                <td>0.7</td>
+                <td>24300</td>
+                <td>1.0x</td>
+                <td>30%</td>
+            </tr>
+            <tr>
+                <td>Warp-Level & Unrolling</td>
+                <td>0.45</td>
+                <td>37800</td>
+                <td>1.55x</td>
+                <td>~47%</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <p>ওয়ার্প-লেভেল টাইলিং এবং লুপ আনরোলিং এর ফলে 2D blocktiling এর তুলনায় ~1.55x স্পিডআপ এবং প্রাথমিক কোড থেকে ~60-70x স্পিডআপ দেখা যায়। T4 GPU এর থিওরেটিক্যাল পিক পারফরম্যান্সের প্রায় 47% অর্জন করা সম্ভব হয়েছে।</p>
+
+    <h2>ইনট্রিনসিক ফাংশন ও ওয়ার্প শাফল</h2>
+    
+    <p>আরো উন্নত ইমপ্লিমেন্টেশনে, CUDA ইনট্রিনসিক ফাংশন যেমন <code>__shfl_sync()</code> ব্যবহার করে ওয়ার্প ভিতরে রেজিস্টারের মাধ্যমে ডেটা শেয়ার করা যায়, যা শেয়ার্ড মেমরি ব্যবহার কমায়।</p>
+    
+    <pre><code>// ওয়ার্প শাফল উদাহরণ
+float a_val = a_reg;  // রেজিস্টারের ডেটা
+float b_val = __shfl_sync(0xffffffff, a_val, target_lane);  // অন্য লেন থেকে ডেটা পান</code></pre>
+
+    <h2>অপটিমাইজেশন সতর্কতা</h2>
+
+    <ul>
+        <li><strong>রেজিস্টার প্রেশার:</strong> বড় থ্রেড টাইল বেশি রেজিস্টার ব্যবহার করে, যা অকুপেন্সি কমাতে পারে।</li>
+        <li><strong>ওয়ার্প সাইজ বাধ্যবাধকতা:</strong> ওয়ার্প সাইজ CUDA তে ফিক্সড (32); আপনার কোড অবশ্যই এর সাথে সঙ্গতিপূর্ণ হতে হবে।</li>
+        <li><strong>লুপ আনরোলিং সাবধানতা:</strong> অত্যধিক আনরোলিং ইন্সট্রাকশন কেশ প্রেশার বাড়াতে পারে।</li>
+    </ul>
+
+    <h2>পরবর্তী পদক্ষেপ</h2>
+
+    <p>আমরা এখন অনেকগুলি অ্যাডভান্সড অপটিমাইজেশন কৌশল লাগিয়ে একটি উচ্চ-পারফরমেন্স GEMM কার্নেল বিকশিত করেছি। পরবর্তী এবং শেষ অধ্যায়ে, আমরা আমাদের ইমপ্লিমেন্টেশন কে cuBLAS-এর সাথে তুলনা করব এবং ম্যাট্রিক্সের বিভিন্ন আকারের পারফরম্যান্স বিশ্লেষণ করব।</p>
+
+    <div class="nav">
+        <a href="chapter8.html">← পূর্ববর্তী অধ্যায়</a>
+        <a href="chapter10.html">পরবর্তী অধ্যায় →</a>
+    </div>
+
+</body>
+</html>

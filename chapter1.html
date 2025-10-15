@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>অধ্যায় ১: ভূমিকা এবং সেটআপ - CUDA GEMM টিউটোরিয়াল</title>
+    <style>
+        body {
+            max-width: 650px;
+            margin: 40px auto;
+            padding: 0 20px;
+            font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.8;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 24px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            font-size: 20px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul, ol {
+            margin-bottom: 20px;
+            padding-left: 30px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .nav {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 40px 0;
+        }
+
+        .note {
+            background: #f9f9f9;
+            border-left: 3px solid #666;
+            padding: 10px 15px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <p><a href="index.html">← সূচিপত্রে ফিরে যান</a></p>
+
+    <h1>অধ্যায় ১: ভূমিকা এবং সেটআপ</h1>
+
+    <p>স্বাগতম! এই অধ্যায়ে আমরা বুঝব GPU কী, কেন এগুলো ম্যাট্রিক্স মাল্টিপ্লিকেশনে ভালো, এবং Google Colab-এ আমাদের ডেভেলপমেন্ট এনভায়রনমেন্ট সেটআপ করব। শেষে আপনি আপনার প্রথম CUDA kernel লিখে রান করতে পারবেন।</p>
+
+    <h2>GPU কী?</h2>
+
+    <p>GPU (Graphics Processing Unit) মূলত CPU থেকে ভিন্ন:</p>
+
+    <ul>
+        <li><strong>CPU:</strong> কয়েকটি শক্তিশালী কোর (সাধারণত ৪-১৬টি), সিকোয়েন্সিয়াল কাজের জন্য অপটিমাইজড, বড় ক্যাশ, জটিল কন্ট্রোল লজিক</li>
+        <li><strong>GPU:</strong> হাজার হাজার সরল কোর, প্যারালাল কাজের জন্য অপটিমাইজড, প্রতি কোরে ছোট ক্যাশ, সরল কন্ট্রোল লজিক</li>
+    </ul>
+
+    <p>ম্যাট্রিক্স মাল্টিপ্লিকেশন (GEMM - General Matrix Multiply) এর জন্য আমাদের লক্ষ লক্ষ স্বাধীন multiply-add অপারেশন করতে হয়। এটি GPU-র জন্য পারফেক্ট কারণ প্রতিটি আউটপুট এলিমেন্ট স্বাধীনভাবে এবং প্যারালালে কম্পিউট করা যায়।</p>
+
+    <h3>GEMM অপারেশন</h3>
+
+    <p>ম্যাট্রিক্স মাল্টিপ্লিকেশন C = A × B কম্পিউট করে যেখানে:</p>
+
+    <ul>
+        <li>A হলো M × K</li>
+        <li>B হলো K × N</li>
+        <li>C হলো M × N</li>
+    </ul>
+
+    <p>প্রতিটি এলিমেন্ট C[i][j] এভাবে কম্পিউট হয়:</p>
+
+    <pre><code>C[i][j] = Σ(k=0 to K-1) A[i][k] * B[k][j]</code></pre>
+
+    <p>৪০৯৬×৪০৯৬ ম্যাট্রিক্স মাল্টিপ্লিকেশনের জন্য, এটি ১৬ মিলিয়নের বেশি আউটপুট এলিমেন্ট, প্রতিটিতে ৪০৯৬টি multiply-add অপারেশন প্রয়োজন। এটি ১৩৭ বিলিয়ন ফ্লোটিং পয়েন্ট অপারেশন! CPU-তে সেকেন্ড লাগবে; GPU মিলিসেকেন্ডে করতে পারে।</p>
+
+    <h2>CUDA বেসিক</h2>
+
+    <p>CUDA হলো NVIDIA-র প্যারালাল কম্পিউটিং প্ল্যাটফর্ম। মূল ধারণাগুলো:</p>
+
+    <ul>
+        <li><strong>Host:</strong> আপনার CPU এবং এর মেমরি (RAM)</li>
+        <li><strong>Device:</strong> আপনার GPU এবং এর মেমরি (VRAM)</li>
+        <li><strong>Kernel:</strong> একটি ফাংশন যা GPU-তে রান করে</li>
+        <li><strong>Thread:</strong> একটি kernel-এর একক এক্সিকিউশন ইন্সট্যান্স</li>
+        <li><strong>Block:</strong> থ্রেডের একটি গ্রুপ যা কোঅপারেট করতে পারে</li>
+        <li><strong>Grid:</strong> ব্লকের একটি কালেকশন</li>
+    </ul>
+
+    <p>যখন আপনি একটি kernel লঞ্চ করেন, আপনি নির্দিষ্ট করেন কতগুলো ব্লক এবং থ্রেড ব্যবহার করবেন। প্রতিটি থ্রেড একটি ইউনিক ID পায় যা দিয়ে সে নির্ধারণ করে কোন কাজটি করবে।</p>
+
+    <h2>Google Colab সেটআপ করা</h2>
+
+    <p>Google Colab ফ্রি GPU এক্সেস দেয়। এভাবে সেটআপ করবেন:</p>
+
+    <ol>
+        <li><a href="https://colab.research.google.com" target="_blank">colab.research.google.com</a>-এ যান</li>
+        <li>একটি নতুন নোটবুক তৈরি করুন</li>
+        <li>রানটাইম GPU-তে পরিবর্তন করুন: Runtime → Change runtime type → T4 GPU</li>
+    </ol>
+
+    <p>যাচাই করুন আপনার কাছে GPU আছে কিনা:</p>
+
+    <pre><code>!nvidia-smi</code></pre>
+
+    <p>আপনার Tesla T4 GPU এবং ~১৫GB মেমরি দেখতে হবে।</p>
+
+    <h2>আপনার প্রথম CUDA প্রোগ্রাম</h2>
+
+    <p>চলুন একটি সরল "Hello World" kernel লিখি। Colab-এ আমরা <code>%%writefile</code> ম্যাজিক ব্যবহার করব CUDA কোড একটি ফাইলে লিখতে, তারপর কম্পাইল এবং রান করব।</p>
+
+    <h3>ধাপ ১: CUDA কোড লিখুন</h3>
+
+    <pre><code>%%writefile hello.cu
+#include &lt;stdio.h&gt;
+
+// এটি একটি kernel - এটি GPU-তে রান করে
+__global__ void hello_kernel() {
+    // প্রতিটি থ্রেড তার ID প্রিন্ট করে
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    printf("Hello from thread %d\n", idx);
+}
+
+int main() {
+    // ২টি ব্লক, প্রতি ব্লকে ৪টি থ্রেড = মোট ৮টি থ্রেড দিয়ে kernel লঞ্চ করুন
+    hello_kernel<<<2, 4>>>();
+    
+    // GPU শেষ হওয়ার জন্য অপেক্ষা করুন
+    cudaDeviceSynchronize();
+    
+    return 0;
+}</code></pre>
+
+    <h3>ধাপ ২: কম্পাইল এবং রান করুন</h3>
+
+    <pre><code>!nvcc hello.cu -o hello
+!./hello</code></pre>
+
+    <p>আপনার ৮টি থ্রেড থেকে আউটপুট দেখা উচিত (ক্রম ভিন্ন হতে পারে কারণ থ্রেডগুলো প্যারালালে এক্সিকিউট হয়):</p>
+
+    <pre><code>Hello from thread 0
+Hello from thread 1
+Hello from thread 2
+...
+Hello from thread 7</code></pre>
+
+    <h3>কোড বুঝে নেওয়া</h3>
+
+    <ul>
+        <li><code>__global__</code>: একটি ফাংশনকে kernel হিসাবে চিহ্নিত করে (host থেকে কল করা যায়, device-এ রান করে)</li>
+        <li><code><<<2, 4>>></code>: লঞ্চ কনফিগারেশন - ২টি ব্লক, প্রতি ব্লকে ৪টি থ্রেড</li>
+        <li><code>blockIdx.x</code>: এই থ্রেডটি কোন ব্লকে আছে (০ বা ১)</li>
+        <li><code>threadIdx.x</code>: ব্লকের মধ্যে কোন থ্রেড (০-৩)</li>
+        <li><code>blockDim.x</code>: প্রতি ব্লকে থ্রেডের সংখ্যা (৪)</li>
+        <li><code>cudaDeviceSynchronize()</code>: সমস্ত GPU কাজ সম্পূর্ণ হওয়ার জন্য অপেক্ষা করুন</li>
+    </ul>
+
+    <h2>একটু বেশি কাজের উদাহরণ: ভেক্টর অ্যাডিশন</h2>
+
+    <p>চলুন কম্পিউটেশনাল কিছু করি - দুটি অ্যারে এলিমেন্ট-ওয়াইজ যোগ করি। এটি মেমরি অ্যালোকেশন এবং ডেটা ট্রান্সফার পরিচয় করিয়ে দেয়।</p>
+
+    <pre><code>%%writefile vector_add.cu
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+
+__global__ void vector_add(float *a, float *b, float *c, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+
+int main() {
+    int n = 1000000;
+    size_t bytes = n * sizeof(float);
+    
+    // Host মেমরি অ্যালোকেট করুন
+    float *h_a = (float*)malloc(bytes);
+    float *h_b = (float*)malloc(bytes);
+    float *h_c = (float*)malloc(bytes);
+    
+    // ইনপুট অ্যারে ইনিশিয়ালাইজ করুন
+    for (int i = 0; i < n; i++) {
+        h_a[i] = i;
+        h_b[i] = i * 2;
+    }
+    
+    // Device মেমরি অ্যালোকেট করুন
+    float *d_a, *d_b, *d_c;
+    cudaMalloc(&d_a, bytes);
+    cudaMalloc(&d_b, bytes);
+    cudaMalloc(&d_c, bytes);
+    
+    // ডেটা device-এ কপি করুন
+    cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice);
+    
+    // Kernel লঞ্চ করুন
+    int threads_per_block = 256;
+    int blocks = (n + threads_per_block - 1) / threads_per_block;
+    vector_add<<<blocks, threads_per_block>>>(d_a, d_b, d_c, n);
+    
+    // রেজাল্ট host-এ ফিরিয়ে আনুন
+    cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
+    
+    // রেজাল্ট যাচাই করুন
+    for (int i = 0; i < 10; i++) {
+        printf("%.0f + %.0f = %.0f\n", h_a[i], h_b[i], h_c[i]);
+    }
+    
+    // ক্লিনআপ
+    free(h_a); free(h_b); free(h_c);
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    
+    return 0;
+}</code></pre>
+
+    <p>কম্পাইল এবং রান করুন:</p>
+
+    <pre><code>!nvcc vector_add.cu -o vector_add
+!./vector_add</code></pre>
+
+    <h3>মূল CUDA ধারণাগুলো পরিচয় করানো হলো</h3>
+
+    <ul>
+        <li><code>cudaMalloc</code>: GPU-তে মেমরি অ্যালোকেট করুন</li>
+        <li><code>cudaMemcpy</code>: host এবং device এর মধ্যে ডেটা কপি করুন</li>
+        <li><code>cudaMemcpyHostToDevice</code>: CPU → GPU</li>
+        <li><code>cudaMemcpyDeviceToHost</code>: GPU → CPU</li>
+        <li><code>cudaFree</code>: GPU মেমরি ফ্রি করুন</li>
+        <li>Grid সাইজ ক্যালকুলেশন: সব এলিমেন্ট কভার করতে আমাদের যথেষ্ট থ্রেড লাগবে</li>
+        <li>Bounds চেকিং: <code>if (idx < n)</code> সেই ক্ষেত্রে হ্যান্ডেল করে যখন আমরা প্রয়োজনের চেয়ে বেশি থ্রেড লঞ্চ করি</li>
+    </ul>
+
+    <h2>CUDA প্রোগ্রামিং মডেল</h2>
+
+    <p>একটি সাধারণ CUDA প্রোগ্রাম এই প্যাটার্ন অনুসরণ করে:</p>
+
+    <ol>
+        <li>GPU-তে মেমরি অ্যালোকেট করুন</li>
+        <li>CPU থেকে GPU-তে ইনপুট ডেটা কপি করুন</li>
+        <li>ডেটা প্রসেস করতে kernel লঞ্চ করুন</li>
+        <li>GPU থেকে CPU-তে রেজাল্ট কপি করুন</li>
+        <li>GPU মেমরি ফ্রি করুন</li>
+    </ol>
+
+    <p>মূল বিষয়: CPU এবং GPU-র মধ্যে ডেটা মুভ করা ধীর (PCIe bandwidth ~১৬ GB/s), কিন্তু GPU কম্পিউটেশন দ্রুত (~৮১০০ GFLOPS T4-তে)। তাই আমরা চাই:</p>
+
+    <ul>
+        <li>ডেটা ট্রান্সফার মিনিমাইজ করতে</li>
+        <li>GPU-তে কম্পিউটেশন ম্যাক্সিমাইজ করতে</li>
+        <li>যথেষ্ট প্যারালাল কাজ দিয়ে GPU ব্যস্ত রাখতে</li>
+    </ul>
+
+    <h2>পরবর্তী কী?</h2>
+
+    <p>এখন আপনি বেসিকগুলো বুঝেছেন এবং একটি কার্যকর CUDA সেটআপ আছে, আমরা ম্যাট্রিক্স মাল্টিপ্লিকেশন শুরু করতে প্রস্তুত। পরবর্তী অধ্যায়ে, আমরা আমাদের প্রথম naive GEMM kernel লিখব।</p>
+
+    <div class="note">
+        <p><strong>অনুশীলন:</strong> vector_add প্রোগ্রামটি পরিবর্তন করে যোগের বদলে গুণ করুন। বিভিন্ন অ্যারে সাইজ চেষ্টা করুন। <code>nvidia-smi</code> ব্যবহার করে GPU মেমরি ব্যবহার দেখুন।</p>
+    </div>
+
+    <div class="nav">
+        <a href="index.html">← সূচিপত্র</a>
+        <a href="chapter2.html">অধ্যায় ২: Naive GEMM Kernel →</a>
+    </div>
+
+</body>
+</html>

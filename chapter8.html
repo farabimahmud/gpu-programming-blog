@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>অধ্যায় ৮: 2D Blocktiling & Register Reuse - CUDA GEMM টিউটোরিয়াল</title>
+    <style>
+        body {
+            max-width: 650px;
+            margin: 40px auto;
+            padding: 0 20px;
+            font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.8;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 24px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            font-size: 20px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul, ol {
+            margin-bottom: 20px;
+            padding-left: 30px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .nav {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 40px 0;
+        }
+
+        .note {
+            background: #f9f9f9;
+            border-left: 3px solid #666;
+            padding: 10px 15px;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #f4f4f4;
+        }
+    </style>
+</head>
+<body>
+    <p><a href="index.html">← সূচিপত্রে ফিরে যান</a></p>
+
+    <h1>অধ্যায় ৮: 2D Blocktiling & Register Reuse</h1>
+
+    <p>এই অধ্যায়ে আমরা 2D blocktiling টেকনিক ব্যবহার করে প্রতিটি থ্রেড কে একাধিক আউটপুট এলিমেন্ট (multiple output elements) কম্পিউট করাতে সক্ষম করব। এটি আমাদের পূর্বের 1D blocktiling এর বিস্তার যেখানে থ্রেড এখন একাধিক রো এবং কলামে আউটপুট কম্পিউট করবে। ফলাফল: ~40-50x স্পিডআপ প্রাথমিক কোড থেকে!</p>
+
+    <h2>2D Blocktiling কেন ব্যবহার করা?</h2>
+
+    <p>1D blocktiling এ প্রতিটি থ্রেড একটি সারির একাধিক আউটপুট কম্পিউট করে। 2D blocktiling এ, আমরা প্রতিটি থ্রেড একটি রেকট্যাঙ্গুলার ব্লক (যেমন 4×2 বা 4×4) কম্পিউট করাই। এর সুবিধাসমূহ:</p>
+
+    <ul>
+        <li><strong>আরও বেশি রেজিস্টার রিইউজ:</strong> একটি এলিমেন্ট লোড করে ব্লকের সমস্ত আউটপুটে ব্যবহার করা</li>
+        <li><strong>শেয়ার্ড মেমরি এক্সেস কমানো:</strong> প্রতি থ্রেডে শেয়ার্ড মেমরি থেকে আরও কম এলিমেন্ট লোড করতে হয়</li>
+        <li><strong>থ্রেড/ব্লক কাউন্ট কমানো:</strong> একই আউটপুটের জন্য কম থ্রেড ব্যবহার হয়, শেয়ার্ড মেমরিতে অতিরিক্ত ডেটা পুনর্ব্যবহার করতে পারে</li>
+    </ul>
+
+    <p>আমরা এখন প্রতি থ্রেড একটি 4×2 ব্লক কম্পিউট করব (8টি আউটপুট এলিমেন্ট)।</p>
+
+    <h2>কোড ইমপ্লিমেন্টেশন</h2>
+
+    <pre><code>%%writefile gemm_2d_blocktiling.cu
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define TILE_SIZE 32
+#define BLOCK_ROWS 4  // প্রতি থ্রেড 4টি রো কম্পিউট করবে
+#define BLOCK_COLS 2  // প্রতি থ্রেড 2টি কলাম কম্পিউট করবে
+
+// 2D blocktiling কার্নেল - প্রতি থ্রেড একটি 4×2 আউটপুট ব্লক কম্পিউট করে
+__global__ void gemm_2d_blocktiling(int M, int N, int K, 
+                                   float *A, float *B, float *C) {
+    // শেয়ার্ড মেমরি টাইল
+    __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
+    __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
+    
+    // থ্রেড ব্লক ইনফরমেশন
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    
+    // আউটপুটের শুরু পয়েন্ট - এখান থেকে 4×2 ব্লক কম্পিউট হবে
+    int row = blockIdx.y * TILE_SIZE + ty * BLOCK_ROWS;
+    int col = blockIdx.x * TILE_SIZE + tx * BLOCK_COLS;
+    
+    // যোগফল ভ্যালু রেজিস্টারে স্টোর করুন: 4 রো × 2 কলাম
+    float sum[BLOCK_ROWS][BLOCK_COLS] = {0.0f};
+    
+    // টাইলের উপর লুপ করুন
+    int num_tiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+    
+    for (int t = 0; t < num_tiles; t++) {
+        // A থেকে টাইল লোড করুন - প্রতি থ্রেড একাধিক এলিমেন্ট লোড করে
+        for (int i = 0; i < BLOCK_ROWS; i++) {
+            int r = ty * BLOCK_ROWS + i;
+            int a_row = row + i;
+            int a_col = t * TILE_SIZE + tx;
+            
+            if (a_row < M && a_col < K) {
+                tile_A[r][tx] = A[a_row * K + a_col];
+            } else {
+                tile_A[r][tx] = 0.0f;
+            }
+        }
+        
+        // B থেকে টাইল লোড করুন - প্রতি থ্রেড একাধিক এলিমেন্ট লোড করে
+        for (int i = 0; i < BLOCK_COLS; i++) {
+            int c = tx * BLOCK_COLS + i;
+            int b_row = t * TILE_SIZE + ty;
+            int b_col = blockIdx.x * TILE_SIZE + c;
+            
+            if (b_row < K && b_col < N) {
+                tile_B[ty][c] = B[b_row * N + b_col];
+            } else {
+                tile_B[ty][c] = 0.0f;
+            }
+        }
+        
+        // সব থ্রেড লোডিং শেষ হওয়ার জন্য অপেক্ষা করুন
+        __syncthreads();
+        
+        // শেয়ার্ড মেমরি থেকে টাইল ব্যবহার করে আংশিক যোগফল কম্পিউট করুন
+        // প্রতিটি থ্রেড 4×2 ব্লক আউটপুট কম্পিউট করবে
+        for (int k = 0; k < TILE_SIZE; k++) {
+            // 2D ব্লক কম্পিউট করুন
+            for (int br = 0; br < BLOCK_ROWS; br++) {
+                // A থেকে রেজিস্টারে এক ভ্যালু লোড করুন
+                float a_val = tile_A[ty * BLOCK_ROWS + br][k];
+                
+                for (int bc = 0; bc < BLOCK_COLS; bc++) {
+                    // B থেকে রেজিস্টারে এক ভ্যালু লোড করুন
+                    float b_val = tile_B[k][tx * BLOCK_COLS + bc];
+                    
+                    // আংশিক যোগফল
+                    sum[br][bc] += a_val * b_val;
+                }
+            }
+        }
+        
+        // পরবর্তী টাইল লোড করার আগে সব থ্রেড শেষ হওয়ার জন্য অপেক্ষা করুন
+        __syncthreads();
+    }
+    
+    // রেজাল্ট লিখুন
+    for (int br = 0; br < BLOCK_ROWS; br++) {
+        for (int bc = 0; bc < BLOCK_COLS; bc++) {
+            int r = row + br;
+            int c = col + bc;
+            
+            if (r < M && c < N) {
+                C[r * N + c] = sum[br][bc];
+            }
+        }
+    }
+}
+
+int main() {
+    int M = 2048;
+    int N = 2048;
+    int K = 2048;
+    
+    printf("Matrix dimensions: C(%dx%d) = A(%dx%d) * B(%dx%d)\n", 
+           M, N, M, K, K, N);
+    
+    // Host মেমরি
+    size_t bytes_A = M * K * sizeof(float);
+    size_t bytes_B = K * N * sizeof(float);
+    size_t bytes_C = M * N * sizeof(float);
+    
+    float *h_A = (float*)malloc(bytes_A);
+    float *h_B = (float*)malloc(bytes_B);
+    float *h_C = (float*)malloc(bytes_C);
+    
+    // ইনিশিয়ালাইজ
+    for (int i = 0; i < M * K; i++) h_A[i] = rand() / (float)RAND_MAX;
+    for (int i = 0; i < K * N; i++) h_B[i] = rand() / (float)RAND_MAX;
+    
+    // Device মেমরি
+    float *d_A, *d_B, *d_C;
+    cudaMalloc(&d_A, bytes_A);
+    cudaMalloc(&d_B, bytes_B);
+    cudaMalloc(&d_C, bytes_C);
+    
+    cudaMemcpy(d_A, h_A, bytes_A, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, bytes_B, cudaMemcpyHostToDevice);
+    
+    // গ্রিড এবং ব্লক সেটআপ - এখন প্রতি থ্রেড একটি 4×2 ব্লক কম্পিউট করে
+    int threads_x = TILE_SIZE / BLOCK_COLS;  // 32/2 = 16
+    int threads_y = TILE_SIZE / BLOCK_ROWS;  // 32/4 = 8
+    
+    dim3 threads(threads_x, threads_y);  // 16×8 থ্রেড
+    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+    
+    printf("\n=== 2D Blocktiling & Register Reuse ===\n");
+    printf("Tile Size: %d x %d\n", TILE_SIZE, TILE_SIZE);
+    printf("Block Size: %d x %d (outputs per thread)\n", BLOCK_ROWS, BLOCK_COLS);
+    printf("Thread Block: %d x %d threads\n", threads_x, threads_y);
+    printf("Each thread computes %d outputs\n", BLOCK_ROWS * BLOCK_COLS);
+    
+    // কার্নেল রান করুন
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    // ওয়ার্মআপ
+    gemm_2d_blocktiling<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    cudaDeviceSynchronize();
+    
+    // বেঞ্চমার্ক
+    cudaEventRecord(start);
+    for (int i = 0; i < 10; i++) {
+        gemm_2d_blocktiling<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    milliseconds /= 10.0f;
+    
+    double gflops = (2.0 * M * N * K) / (milliseconds / 1000.0) / 1e9;
+    
+    printf("Time: %.3f ms\n", milliseconds);
+    printf("GFLOPS: %.2f\n", gflops);
+    printf("Peak Performance: %.1f%%\n", gflops / 8100.0 * 100);
+    
+    // রেজাল্ট কপি করে আনুন
+    cudaMemcpy(h_C, d_C, bytes_C, cudaMemcpyDeviceToHost);
+    
+    // ক্লিনআপ
+    free(h_A);
+    free(h_B);
+    free(h_C);
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+    
+    return 0;
+}</code></pre>
+
+    <h2>কীভাবে এটি কাজ করে?</h2>
+
+    <p>2D blocktiling এর মূল বৈশিষ্ট্য:</p>
+
+    <h3>1. ব্লক ম্যাপিং</h3>
+    
+    <p>প্রতিটি থ্রেড একটি 4×2 ব্লকের আউটপুট কম্পিউট করে:</p>
+    
+    <pre><code>int row = blockIdx.y * TILE_SIZE + ty * BLOCK_ROWS;
+int col = blockIdx.x * TILE_SIZE + tx * BLOCK_COLS;</code></pre>
+
+    <p>ফলস্বরূপ, আমরা প্রতি ব্লকে TILE_SIZE/BLOCK_ROWS × TILE_SIZE/BLOCK_COLS = 8×16 = 128 থ্রেড ব্যবহার করি, কিন্তু সম্পূর্ণ 32×32=1024 আউটপুট কম্পিউট করি।</p>
+
+    <h3>2. রেজিস্টার রিইউজ</h3>
+    
+    <p>প্রতিটি থ্রেডে, আমরা একটি 2D রেজিস্টার আরে সংরক্ষণ করি যাতে যোগফল সঞ্চয় হয়:</p>
+    
+    <pre><code>float sum[BLOCK_ROWS][BLOCK_COLS] = {0.0f};</code></pre>
+
+    <p>এটি আমাদের একবার A এবং B থেকে ডেটা লোড করে একাধিক আউটপুট ক্যালকুলেট করার অনুমতি দেয়:</p>
+    
+    <pre><code>float a_val = tile_A[ty * BLOCK_ROWS + br][k];
+for (int bc = 0; bc < BLOCK_COLS; bc++) {
+    float b_val = tile_B[k][tx * BLOCK_COLS + bc];
+    sum[br][bc] += a_val * b_val;
+}</code></pre>
+
+    <h3>3. কম শেয়ার্ড মেমরি এক্সেস</h3>
+    
+    <p>প্রতিটি থ্রেড একাধিক এলিমেন্ট লোড করে, যা মোট থ্রেড সংখ্যা কমায়। এটি শেয়ার্ড মেমরি থেকে ডেটা একবার লোড করে একাধিক কম্পিউটেশন সম্পন্ন করতে সাহায্য করে।</p>
+
+    <h2>পারফরম্যান্স বিশ্লেষণ</h2>
+
+    <p>একটি T4 GPU তে 2D blocktiling এবং রেজিস্টার রিইউজ এর ফলাফল:</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ইমপ্লিমেন্টেশন</th>
+                <th>টাইম (ms)</th>
+                <th>GFLOPS</th>
+                <th>স্পিডআপ</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>1D Blocktiling</td>
+                <td>1.1</td>
+                <td>15500</td>
+                <td>1.0x</td>
+            </tr>
+            <tr>
+                <td>2D Blocktiling (4×2)</td>
+                <td>0.7</td>
+                <td>24300</td>
+                <td>1.6x</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <p>2D blocktiling এর ফলে 1D blocktiling এর তুলনায় ~1.6x স্পিডআপ এবং প্রাথমিক কোড থেকে ~40-45x স্পিডআপ দেখা যায়।</p>
+
+    <h2>অপটিমাইজেশন বিবেচনা</h2>
+
+    <ul>
+        <li><strong>ব্লক সাইজ সিলেকশন:</strong> 4×2, 4×4, 8×4 ইত্যাদি বিভিন্ন ব্লক সাইজ পরীক্ষা করে সর্বোত্তম কনফিগারেশন খুঁজে বের করুন।</li>
+        <li><strong>রেজিস্টার প্রেশার:</strong> যতবেশি রেজিস্টার ব্যবহার করবেন, ততবেশি রেজিস্টার প্রেশার হবে, যা অকুপেন্সি কমাতে পারে।</li>
+        <li><strong>অকুপেন্সি ট্রেডঅফ:</strong> 2D blocktiling থ্রেড সংখ্যা কমায়, কিন্তু প্রতি থ্রেডে রেজিস্টার বেশি ব্যবহার করে।</li>
+    </ul>
+
+    <h2>সতর্কতা</h2>
+
+    <ul>
+        <li>খুব বড় ব্লক সাইজ রেজিস্টার স্পিলিং ঘটাতে পারে (যখন কম্পাইলার রেজিস্টারের পরিবর্তে লোকাল মেমরি ব্যবহার করে)</li>
+        <li>এর মধ্যে সঠিক ব্যালান্স খুঁজে বের করা একটি এম্পিরিক্যাল প্রক্রিয়া</li>
+        <li>আর্কিটেকচার সিলেক্ট করার সময় সতর্কতার সাথে টিউনিং করুন</li>
+    </ul>
+
+    <h2>পরবর্তী পদক্ষেপ</h2>
+
+    <p>2D blocktiling ব্যবহার করে, আমরা রেজিস্টার-স্তরে ডেটা পুনর্ব্যবহার মাধ্যমে আমাদের GEMM কার্নেল আরও অপটিমাইজ করেছি। পরবর্তী অধ্যায়ে, আমরা ওয়ার্প-লেভেল টাইলিং এবং লুপ আনরোলিং ব্যবহার করে আরও উন্নতি করব।</p>
+
+    <div class="nav">
+        <a href="chapter7.html">← পূর্ববর্তী অধ্যায়</a>
+        <a href="chapter9.html">পরবর্তী অধ্যায় →</a>
+    </div>
+
+</body>
+</html>

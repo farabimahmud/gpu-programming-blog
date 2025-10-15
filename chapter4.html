@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>অধ্যায় ৪: Coalesced Memory Access - CUDA GEMM টিউটোরিয়াল</title>
+    <style>
+        body {
+            max-width: 650px;
+            margin: 40px auto;
+            padding: 0 20px;
+            font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.8;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 24px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            font-size: 20px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul, ol {
+            margin-bottom: 20px;
+            padding-left: 30px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .nav {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 40px 0;
+        }
+
+        .note {
+            background: #f9f9f9;
+            border-left: 3px solid #666;
+            padding: 10px 15px;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #f4f4f4;
+        }
+    </style>
+</head>
+<body>
+    <p><a href="index.html">← সূচিপত্রে ফিরে যান</a></p>
+
+    <h1>অধ্যায় ৪: Coalesced Memory Access</h1>
+
+    <p>এই অধ্যায়ে আমরা আমাদের প্রথম অপটিমাইজেশন করব। আমরা B ম্যাট্রিক্স ট্রান্সপোজ করব যাতে মেমরি এক্সেস coalesced হয়। এটি একটি সরল পরিবর্তন কিন্তু উল্লেখযোগ্য স্পিডআপ দেয়।</p>
+
+    <h2>সমস্যা পুনরায় দেখা</h2>
+
+    <p>আমাদের naive kernel-এ:</p>
+
+    <pre><code>// A থেকে পড়া - COALESCED ✓
+A[row * K + k]
+
+// B থেকে পড়া - UNCOALESCED ✗
+B[k * N + col]</code></pre>
+
+    <p>কেন B আনকোয়ালেসড? কল্পনা করুন 32টি থ্রেড একটি ওয়ার্পে:</p>
+
+    <ul>
+        <li>Thread 0: <code>B[k * N + 0]</code> পড়ে</li>
+        <li>Thread 1: <code>B[k * N + 1]</code> পড়ে</li>
+        <li>Thread 2: <code>B[k * N + 2]</code> পড়ে</li>
+        <li>...</li>
+        <li>Thread 31: <code>B[k * N + 31]</code> পড়ে</li>
+    </ul>
+
+    <p>এটি ভালো দেখায়! কিন্তু পরবর্তী ইটারেশনে (k+1):</p>
+
+    <ul>
+        <li>Thread 0: <code>B[(k+1) * N + 0]</code> পড়ে</li>
+        <li>এটি আগের পড়ার থেকে N এলিমেন্ট দূরে!</li>
+    </ul>
+
+    <p>যদি N=512, প্রতিটি থ্রেড 2KB (512×4 বাইট) দূরে এক্সেস করে। ওয়ার্পের থ্রেডগুলো একটি B-র কলাম জুড়ে পড়ে, কিন্তু B মেমরিতে row-major অর্ডারে স্টোর করা আছে।</p>
+
+    <h2>সমাধান: B ট্রান্সপোজ করুন</h2>
+
+    <p>যদি আমরা B ট্রান্সপোজ করি, তাহলে আমরা পড়ি:</p>
+
+    <pre><code>B_T[col * K + k]  // এখন coalesced!</code></pre>
+
+    <p>এখন পাশের থ্রেডগুলো পাশের মেমরি লোকেশন পড়ে।</p>
+
+    <h3>গণিত</h3>
+
+    <p>আসল: <code>C = A × B</code></p>
+
+    <p>B ট্রান্সপোজ করার পরে: <code>C = A × B^T^T = A × B^T^T</code></p>
+
+    <p>কোডে: <code>C[i][j] = Σ A[i][k] * B^T[j][k]</code></p>
+
+    <h2>সম্পূর্ণ কোড</h2>
+
+    <pre><code>%%writefile gemm_coalesced.cu
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+// Naive kernel (পূর্ববর্তী অধ্যায় থেকে - তুলনার জন্য)
+__global__ void gemm_naive(int M, int N, int K, 
+                           float *A, float *B, float *C) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (row < M && col < N) {
+        float sum = 0.0f;
+        for (int k = 0; k < K; k++) {
+            sum += A[row * K + k] * B[k * N + col];
+        }
+        C[row * N + col] = sum;
+    }
+}
+
+// Coalesced kernel: B ট্রান্সপোজ করা
+__global__ void gemm_coalesced(int M, int N, int K, 
+                               float *A, float *B_T, float *C) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (row < M && col < N) {
+        float sum = 0.0f;
+        // এখন B_T থেকে পড়া coalesced
+        for (int k = 0; k < K; k++) {
+            sum += A[row * K + k] * B_T[col * K + k];
+        }
+        C[row * N + col] = sum;
+    }
+}
+
+// CPU-তে ম্যাট্রিক্স ট্রান্সপোজ
+void transpose_cpu(float *input, float *output, int rows, int cols) {
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            output[j * rows + i] = input[i * cols + j];
+        }
+    }
+}
+
+// যাচাইয়ের জন্য CPU GEMM
+void gemm_cpu(int M, int N, int K, 
+              float *A, float *B, float *C) {
+    for (int i = 0; i < M; i++) {
+        for (int j = 0; j < N; j++) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; k++) {
+                sum += A[i * K + k] * B[k * N + j];
+            }
+            C[i * N + j] = sum;
+        }
+    }
+}
+
+bool verify_result(float *C_cpu, float *C_gpu, int M, int N) {
+    for (int i = 0; i < M * N; i++) {
+        if (fabs(C_cpu[i] - C_gpu[i]) > 1e-3) {
+            printf("Mismatch at %d: CPU=%.6f, GPU=%.6f\n", 
+                   i, C_cpu[i], C_gpu[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+float benchmark_kernel(void (*kernel)(int, int, int, float*, float*, float*),
+                       int M, int N, int K, 
+                       float *d_A, float *d_B, float *d_C,
+                       dim3 blocks, dim3 threads) {
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    // ওয়ার্মআপ
+    kernel<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    cudaDeviceSynchronize();
+    
+    // বেঞ্চমার্ক
+    cudaEventRecord(start);
+    for (int i = 0; i < 10; i++) {
+        kernel<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    
+    return milliseconds / 10.0f;  // গড় সময়
+}
+
+int main() {
+    int M = 1024;
+    int N = 1024;
+    int K = 1024;
+    
+    printf("Matrix dimensions: C(%dx%d) = A(%dx%d) * B(%dx%d)\n\n", 
+           M, N, M, K, K, N);
+    
+    // Host মেমরি অ্যালোকেট করুন
+    size_t bytes_A = M * K * sizeof(float);
+    size_t bytes_B = K * N * sizeof(float);
+    size_t bytes_C = M * N * sizeof(float);
+    
+    float *h_A = (float*)malloc(bytes_A);
+    float *h_B = (float*)malloc(bytes_B);
+    float *h_B_T = (float*)malloc(bytes_B);
+    float *h_C = (float*)malloc(bytes_C);
+    float *h_C_ref = (float*)malloc(bytes_C);
+    
+    // র‍্যান্ডম ভ্যালু দিয়ে ইনিশিয়ালাইজ
+    for (int i = 0; i < M * K; i++) h_A[i] = rand() / (float)RAND_MAX;
+    for (int i = 0; i < K * N; i++) h_B[i] = rand() / (float)RAND_MAX;
+    
+    // B ট্রান্সপোজ করুন
+    transpose_cpu(h_B, h_B_T, K, N);
+    
+    // Device মেমরি অ্যালোকেট করুন
+    float *d_A, *d_B, *d_B_T, *d_C;
+    cudaMalloc(&d_A, bytes_A);
+    cudaMalloc(&d_B, bytes_B);
+    cudaMalloc(&d_B_T, bytes_B);
+    cudaMalloc(&d_C, bytes_C);
+    
+    // ডেটা device-এ কপি করুন
+    cudaMemcpy(d_A, h_A, bytes_A, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, bytes_B, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B_T, h_B_T, bytes_B, cudaMemcpyHostToDevice);
+    
+    // Kernel কনফিগারেশন
+    dim3 threads(16, 16);
+    dim3 blocks((N + threads.x - 1) / threads.x,
+                (M + threads.y - 1) / threads.y);
+    
+    printf("Grid: %dx%d blocks, Block: %dx%d threads\n\n", 
+           blocks.x, blocks.y, threads.x, threads.y);
+    
+    // Naive kernel বেঞ্চমার্ক
+    printf("Running naive kernel...\n");
+    float time_naive = benchmark_kernel(gemm_naive, M, N, K, 
+                                        d_A, d_B, d_C, blocks, threads);
+    cudaMemcpy(h_C, d_C, bytes_C, cudaMemcpyDeviceToHost);
+    
+    // CPU-তে যাচাই
+    printf("Verifying naive kernel...\n");
+    gemm_cpu(M, N, K, h_A, h_B, h_C_ref);
+    bool correct_naive = verify_result(h_C_ref, h_C, M, N);
+    
+    double gflops_naive = (2.0 * M * N * K) / (time_naive / 1000.0) / 1e9;
+    printf("Naive kernel: %s\n", correct_naive ? "CORRECT" : "INCORRECT");
+    printf("Time: %.3f ms, GFLOPS: %.2f\n\n", time_naive, gflops_naive);
+    
+    // Coalesced kernel বেঞ্চমার্ক
+    printf("Running coalesced kernel...\n");
+    float time_coalesced = benchmark_kernel(gemm_coalesced, M, N, K, 
+                                            d_A, d_B_T, d_C, blocks, threads);
+    cudaMemcpy(h_C, d_C, bytes_C, cudaMemcpyDeviceToHost);
+    
+    printf("Verifying coalesced kernel...\n");
+    bool correct_coalesced = verify_result(h_C_ref, h_C, M, N);
+    
+    double gflops_coalesced = (2.0 * M * N * K) / (time_coalesced / 1000.0) / 1e9;
+    printf("Coalesced kernel: %s\n", correct_coalesced ? "CORRECT" : "INCORRECT");
+    printf("Time: %.3f ms, GFLOPS: %.2f\n\n", time_coalesced, gflops_coalesced);
+    
+    // তুলনা
+    printf("=== Performance Comparison ===\n");
+    printf("Speedup: %.2fx\n", time_naive / time_coalesced);
+    printf("GFLOPS improvement: %.2f → %.2f (%.1f%% increase)\n",
+           gflops_naive, gflops_coalesced, 
+           (gflops_coalesced - gflops_naive) / gflops_naive * 100);
+    
+    // ক্লিনআপ
+    free(h_A); free(h_B); free(h_B_T); free(h_C); free(h_C_ref);
+    cudaFree(d_A); cudaFree(d_B); cudaFree(d_B_T); cudaFree(d_C);
+    
+    return 0;
+}</code></pre>
+
+    <p>কম্পাইল এবং রান করুন:</p>
+
+    <pre><code>!nvcc gemm_coalesced.cu -o gemm_coalesced
+!./gemm_coalesced</code></pre>
+
+    <h2>প্রত্যাশিত আউটপুট</h2>
+
+    <p>1024×1024 ম্যাট্রিক্সের জন্য T4 GPU-তে:</p>
+
+    <pre><code>Matrix dimensions: C(1024x1024) = A(1024x1024) * B(1024x1024)
+
+Grid: 64x64 blocks, Block: 16x16 threads
+
+Running naive kernel...
+Verifying naive kernel...
+Naive kernel: CORRECT
+Time: 15.xxx ms, GFLOPS: ~140
+
+Running coalesced kernel...
+Verifying coalesced kernel...
+Coalesced kernel: CORRECT
+Time: 6.xxx ms, GFLOPS: ~340
+
+=== Performance Comparison ===
+Speedup: 2.4x
+GFLOPS improvement: 140 → 340 (143% increase)</code></pre>
+
+    <h2>কেন এটি দ্রুত?</h2>
+
+    <h3>মেমরি ট্রান্সাকশন</h3>
+
+    <p>Naive kernel (B আনকোয়ালেসড):</p>
+
+    <ul>
+        <li>একটি ওয়ার্প B-র একটি কলাম জুড়ে পড়ে</li>
+        <li>প্রতিটি থ্রেড N এলিমেন্ট দূরে এক্সেস করে</li>
+        <li>GPU-কে 32টি পৃথক মেমরি ট্রান্সাকশন করতে হয়</li>
+    </ul>
+
+    <p>Coalesced kernel (B^T কোয়ালেসড):</p>
+
+    <ul>
+        <li>একটি ওয়ার্প B^T-র একটি row জুড়ে পড়ে</li>
+        <li>পাশের থ্রেডগুলো পাশের ঠিকানা পড়ে</li>
+        <li>GPU 1টি বা 2টি মেমরি ট্রান্সাকশনে এটি করতে পারে</li>
+    </ul>
+
+    <h3>ব্যান্ডউইথ ব্যবহার</h3>
+
+    <p>আনকোয়ালেসড এক্সেস ব্যান্ডউইথ নষ্ট করে:</p>
+
+    <ul>
+        <li>মেমরি 128-বাইট লাইনে ফেচ করা হয়</li>
+        <li>যদি আপনি শুধু 4 বাইট চান কিন্তু 128 বাইট ফেচ হয়, আপনি 96.9% নষ্ট করছেন</li>
+        <li>Coalesced এক্সেস ফেচ করা ডেটা ব্যবহার করে</li>
+    </ul>
+
+    <h2>ট্রেডঅফ: ট্রান্সপোজ ওভারহেড</h2>
+
+    <p>আমাদের B ট্রান্সপোজ করতে হয় যার সময় লাগে। একটি সত্যিকারের অ্যাপ্লিকেশনে:</p>
+
+    <ul>
+        <li>যদি আপনি B একবার ব্যবহার করেন: ট্রান্সপোজ ওভারহেড হতে পারে মূল্যবান নয়</li>
+        <li>যদি আপনি B বারবার ব্যবহার করেন: একবার ট্রান্সপোজ করুন, অনেক দ্রুত GEMM পান</li>
+    </ul>
+
+    <p>পরবর্তী অধ্যায়ে শেয়ার্ড মেমরি ট্রান্সপোজ ওভারহেড ছাড়াই কোয়ালেসিং সমাধান করবে।</p>
+
+    <h2>বিভিন্ন সাইজ পরীক্ষা</h2>
+
+    <p>বিভিন্ন ম্যাট্রিক্স সাইজের জন্য প্রত্যাশিত স্পিডআপ:</p>
+
+    <table>
+        <tr>
+            <th>সাইজ</th>
+            <th>Naive (ms)</th>
+            <th>Coalesced (ms)</th>
+            <th>স্পিডআপ</th>
+        </tr>
+        <tr>
+            <td>512×512</td>
+            <td>~2.0</td>
+            <td>~0.8</td>
+            <td>2.5x</td>
+        </tr>
+        <tr>
+            <td>1024×1024</td>
+            <td>~15</td>
+            <td>~6</td>
+            <td>2.5x</td>
+        </tr>
+        <tr>
+            <td>2048×2048</td>
+            <td>~120</td>
+            <td>~48</td>
+            <td>2.5x</td>
+        </tr>
+        <tr>
+            <td>4096×4096</td>
+            <td>~950</td>
+            <td>~380</td>
+            <td>2.5x</td>
+        </tr>
+    </table>
+
+    <h2>আমরা এখনও কতটা দূরে?</h2>
+
+    <p>T4 পিক পারফরম্যান্স: 8100 GFLOPS</p>
+
+    <p>আমাদের coalesced kernel: ~340 GFLOPS</p>
+
+    <p>এটি পিকের ~4.2%। আমরা উন্নতি করেছি, কিন্তু এখনও অনেক দূরে!</p>
+
+    <p>কেন এখনও ধীর?</p>
+
+    <ul>
+        <li>আমরা এখনও প্রতিটি FLOP-এর জন্য গ্লোবাল মেমরি থেকে পড়ছি</li>
+        <li>কোন ডেটা পুনর্ব্যবহার নেই</li>
+        <li>কম arithmetic intensity</li>
+        <li>গ্লোবাল মেমরি ব্যান্ডউইথ এখনও বটলনেক</li>
+    </ul>
+
+    <h2>পরবর্তী কী?</h2>
+
+    <p>পরবর্তী অধ্যায়ে আমরা একটি গেম-চেঞ্জিং অপটিমাইজেশন প্রবর্তন করব: <strong>শেয়ার্ড মেমরি টাইলিং</strong>। গ্লোবাল মেমরি থেকে প্রতিটি এলিমেন্ট বারবার পড়ার পরিবর্তে, আমরা দ্রুত অন-চিপ শেয়ার্ড মেমরিতে ডেটার ছোট "টাইল" লোড করব এবং সেখান থেকে বারবার পড়ব। এটি 10-15x স্পিডআপ দেবে!</p>
+
+    <div class="note">
+        <p><strong>মূল উপলব্ধি:</strong></p>
+        <ul>
+            <li>মেমরি কোয়ালেসিং গুরুত্বপূর্ণ - 2-3x পার্থক্য করতে পারে</li>
+            <li>ওয়ার্পের থ্রেডগুলোকে ধারাবাহিক ঠিকানা এক্সেস করা উচিত</li>
+            <li>ম্যাট্রিক্স ট্রান্সপোজ করা মেমরি প্যাটার্ন উন্নত করতে পারে</li>
+            <li>কিন্তু আমাদের এখনও ডেটা পুনর্ব্যবহার প্রয়োজন সত্যিকারের উচ্চ পারফরম্যান্সের জন্য</li>
+        </ul>
+    </div>
+
+    <div class="note">
+        <p><strong>অনুশীলন:</strong></p>
+        <ul>
+            <li>A ম্যাট্রিক্সও ট্রান্সপোজ করে দেখুন। এটি সাহায্য করে?</li>
+            <li>বিভিন্ন ব্লক সাইজ (8×8, 32×32) চেষ্টা করুন</li>
+            <li>nvidia-nsight-systems দিয়ে প্রোফাইল করুন মেমরি থ্রুপুট দেখতে</li>
+        </ul>
+    </div>
+
+    <div class="nav">
+        <a href="chapter3.html">← অধ্যায় ৩</a>
+        <a href="chapter5.html">অধ্যায় ৫: Shared Memory Tiling →</a>
+    </div>
+
+</body>
+</html>

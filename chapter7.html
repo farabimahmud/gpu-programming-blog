@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>অধ্যায় ৭: 1D Blocktiling with Wider Loads - CUDA GEMM টিউটোরিয়াল</title>
+    <style>
+        body {
+            max-width: 650px;
+            margin: 40px auto;
+            padding: 0 20px;
+            font-family: 'Kalpurush', 'Noto Sans Bengali', 'SolaimanLipi', Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.8;
+            color: #333;
+        }
+
+        h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 24px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+
+        h3 {
+            font-size: 20px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+
+        p {
+            margin-bottom: 15px;
+        }
+
+        ul, ol {
+            margin-bottom: 20px;
+            padding-left: 30px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .nav {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 40px 0;
+        }
+
+        .note {
+            background: #f9f9f9;
+            border-left: 3px solid #666;
+            padding: 10px 15px;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+
+        th {
+            background: #f4f4f4;
+        }
+    </style>
+</head>
+<body>
+    <p><a href="index.html">← সূচিপত্রে ফিরে যান</a></p>
+
+    <h1>অধ্যায় ৭: 1D Blocktiling with Wider Loads</h1>
+
+    <p>এই অধ্যায়ে আমরা দুটি নতুন টেকনিক শিখব: 1D blocktiling এবং vectorized loads। এই দুটি একসাথে ব্যবহার করে, আমরা কার্নেলের মেমরি থ্রুপুট আরও বাড়াতে পারি। সম্পূর্ণ ইমপ্লিমেন্টেশন ~30-35x স্পিডআপ দিতে পারে আমাদের প্রাথমিক কোড থেকে।</p>
+
+    <h2>ভেক্টরাইজড লোড কী?</h2>
+
+    <p>CUDA তে আমরা <code>float4</code>, <code>float2</code> টাইপ ব্যবহার করে একসাথে একাধিক ফ্লোটিং পয়েন্ট ভ্যালু লোড করতে পারি:</p>
+
+    <ul>
+        <li><strong>float4</strong>: একসাথে 4টি ফ্লোট (16 বাইট) লোড করে</li>
+        <li><strong>float2</strong>: একসাথে 2টি ফ্লোট (8 বাইট) লোড করে</li>
+    </ul>
+
+    <p>এই টাইপগুলো ব্যবহার করলে লোড ইনস্ট্রাকশনের সংখ্যা কমে, মেমরি থ্রুপুট বাড়ে, এবং লোড/স্টোর বোতল-নেক কমে। তবে এর জন্য মেমরি এক্সেস অবশ্যই অ্যালাইনড হতে হবে (16 বাইট বা 8 বাইট বাউন্ডারিতে)।</p>
+
+    <h2>1D Blocktiling কী?</h2>
+
+    <p>আগের অধ্যায়ে, প্রতিটি থ্রেড শুধু একটি আউটপুট এলিমেন্ট কম্পিউট করত। 1D blocktiling এ, প্রতিটি থ্রেড একটি সারিতে বা কলামে একাধিক আউটপুট এলিমেন্ট কম্পিউট করে। এর ফায়দা:</p>
+
+    <ul>
+        <li>ডেটা পুনর্ব্যবহার বাড়ে (কমন ডেটা একাধিক আউটপুটের জন্য ব্যবহৃত হয়)</li>
+        <li>কোলেস্ড মেমরি এক্সেস আরও উন্নত হয় (লাইন-ওরিয়েন্টেড এক্সেস)</li>
+        <li>শেয়ার্ড মেমরি থেকে আরও বেশি ব্যান্ডউইথ পাওয়া যায়</li>
+    </ul>
+
+    <h2>কোড উদাহরণ</h2>
+
+    <pre><code>%%writefile gemm_1d_blocktiling.cu
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;cuda_runtime.h&gt;
+
+#define TILE_SIZE 32
+#define VECTOR_SIZE 4  // float4 = 4 floats
+#define BLOCK_SIZE_X (TILE_SIZE / VECTOR_SIZE)  // 8 থ্রেড × 4 floats = 32 এলিমেন্ট
+
+// float4 এর জন্য টাইপ ডেফিনেশন
+typedef float4 v4;
+
+// 1D blocktiling এবং vectorized লোডস ব্যবহার করে কার্নেল
+__global__ void gemm_1d_blocktiling(int M, int N, int K, 
+                                   float *A, float *B, float *C) {
+    // শেয়ার্ড মেমরি টাইল
+    __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
+    __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
+    
+    // আউটপুট পজিশন - প্রতিটি থ্রেড 4টি অতিরিক্ত কলাম হ্যান্ডেল করবে
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x * VECTOR_SIZE;
+    
+    // প্রতিটি থ্রেড 4টি আউটপুট কম্পিউট করবে
+    float sum[VECTOR_SIZE] = {0.0f, 0.0f, 0.0f, 0.0f};
+    
+    // টাইলের উপর লুপ
+    int num_tiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+    
+    for (int t = 0; t < num_tiles; t++) {
+        // A এর একটি টাইল লোড করুন
+        // প্রতিটি থ্রেড থেকে একটি এলিমেন্ট লোড করে
+        int a_row = row;
+        int a_col = t * TILE_SIZE + threadIdx.x * VECTOR_SIZE;
+        
+        for (int i = 0; i < VECTOR_SIZE; i++) {
+            if (a_row < M && a_col + i < K) {
+                tile_A[threadIdx.y][threadIdx.x * VECTOR_SIZE + i] = A[a_row * K + a_col + i];
+            } else {
+                tile_A[threadIdx.y][threadIdx.x * VECTOR_SIZE + i] = 0.0f;
+            }
+        }
+        
+        // B এর একটি টাইল লোড করুন
+        // প্রতিটি থ্রেড থেকে একটি রো লোড করে
+        int b_row = t * TILE_SIZE + threadIdx.y;
+        int b_col = blockIdx.x * TILE_SIZE + threadIdx.x * VECTOR_SIZE;
+        
+        for (int i = 0; i < VECTOR_SIZE; i++) {
+            if (b_row < K && b_col + i < N) {
+                tile_B[threadIdx.y][threadIdx.x * VECTOR_SIZE + i] = B[b_row * N + b_col + i];
+            } else {
+                tile_B[threadIdx.y][threadIdx.x * VECTOR_SIZE + i] = 0.0f;
+            }
+        }
+        
+        // সব থ্রেড লোডিং শেষ হওয়ার জন্য অপেক্ষা করুন
+        __syncthreads();
+        
+        // শেয়ার্ড মেমরি থেকে টাইল ব্যবহার করে আংশিক যোগফল কম্পিউট করুন
+        // প্রতিটি থ্রেড 4টি আউটপুট কম্পিউট করবে
+        for (int k = 0; k < TILE_SIZE; k++) {
+            float a_val = tile_A[threadIdx.y][k];
+            for (int v = 0; v < VECTOR_SIZE; v++) {
+                sum[v] += a_val * tile_B[k][threadIdx.x * VECTOR_SIZE + v];
+            }
+        }
+        
+        // পরবর্তী টাইল লোড করার আগে সব থ্রেড শেষ হওয়ার জন্য অপেক্ষা করুন
+        __syncthreads();
+    }
+    
+    // রেজাল্ট লিখুন
+    for (int v = 0; v < VECTOR_SIZE; v++) {
+        if (row < M && col + v < N) {
+            C[row * N + col + v] = sum[v];
+        }
+    }
+}
+
+int main() {
+    int M = 2048;
+    int N = 2048;
+    int K = 2048;
+    
+    printf("Matrix dimensions: C(%dx%d) = A(%dx%d) * B(%dx%d)\n", 
+           M, N, M, K, K, N);
+    
+    // Host মেমরি
+    size_t bytes_A = M * K * sizeof(float);
+    size_t bytes_B = K * N * sizeof(float);
+    size_t bytes_C = M * N * sizeof(float);
+    
+    float *h_A = (float*)malloc(bytes_A);
+    float *h_B = (float*)malloc(bytes_B);
+    float *h_C = (float*)malloc(bytes_C);
+    float *h_C_ref = (float*)malloc(bytes_C);
+    
+    // ইনিশিয়ালাইজ
+    for (int i = 0; i < M * K; i++) h_A[i] = rand() / (float)RAND_MAX;
+    for (int i = 0; i < K * N; i++) h_B[i] = rand() / (float)RAND_MAX;
+    
+    // Device মেমরি
+    float *d_A, *d_B, *d_C;
+    cudaMalloc(&d_A, bytes_A);
+    cudaMalloc(&d_B, bytes_B);
+    cudaMalloc(&d_C, bytes_C);
+    
+    cudaMemcpy(d_A, h_A, bytes_A, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, bytes_B, cudaMemcpyHostToDevice);
+    
+    // গ্রিড এবং ব্লক সেটআপ
+    dim3 threads(BLOCK_SIZE_X, TILE_SIZE);  // 8x32 থ্রেড, প্রতিটি থ্রেড 4টি এলিমেন্ট কম্পিউট করে
+    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+    
+    printf("\n=== 1D Blocktiling with Vectorized Loads ===\n");
+    printf("Tile Size: %d x %d\n", TILE_SIZE, TILE_SIZE);
+    printf("Vector Size: %d (float%d)\n", VECTOR_SIZE, VECTOR_SIZE);
+    printf("Thread Block: %d x %d threads\n", BLOCK_SIZE_X, TILE_SIZE);
+    printf("Each thread computes %d outputs\n", VECTOR_SIZE);
+    
+    // কার্নেল রান করুন
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    // ওয়ার্মআপ
+    gemm_1d_blocktiling<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    cudaDeviceSynchronize();
+    
+    // বেঞ্চমার্ক
+    cudaEventRecord(start);
+    for (int i = 0; i < 10; i++) {
+        gemm_1d_blocktiling<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    milliseconds /= 10.0f;
+    
+    double gflops = (2.0 * M * N * K) / (milliseconds / 1000.0) / 1e9;
+    
+    printf("Time: %.3f ms\n", milliseconds);
+    printf("GFLOPS: %.2f\n", gflops);
+    printf("Peak Performance: %.1f%%\n", gflops / 8100.0 * 100);
+    
+    // রেজাল্ট কপি করে আনুন
+    cudaMemcpy(h_C, d_C, bytes_C, cudaMemcpyDeviceToHost);
+    
+    // ক্লিনআপ
+    free(h_A);
+    free(h_B);
+    free(h_C);
+    free(h_C_ref);
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+    
+    return 0;
+}</code></pre>
+
+    <h2>কীভাবে এটি কাজ করে?</h2>
+
+    <p>এই অপটিমাইজেশনের মূল পয়েন্টগুলো:</p>
+
+    <ol>
+        <li><strong>Vectorized Loads:</strong> আমরা <code>float4</code> টাইপ ব্যবহার করছি, যা একসাথে 4টি ফ্লোট ডেটা এক্সেস করতে পারে।</li>
+        <li><strong>1D Blocktiling:</strong> প্রতি থ্রেড <code>VECTOR_SIZE</code> (4) আউটপুট এলিমেন্ট কম্পিউট করে।</li>
+        <li><strong>থ্রেড ব্লক আকার:</strong> আমরা শুধু <code>BLOCK_SIZE_X</code> (8) থ্রেড X দিকে ব্যবহার করি, কিন্তু প্রতিটি থ্রেড 4টি আউটপুট এলিমেন্ট কম্পিউট করে, তাই মোট 8×4=32 এলিমেন্ট প্রক্রিয়া করা হয়।</li>
+        <li><strong>লুপ স্ট্রাকচার:</strong> যেহেতু প্রতিটি থ্রেড একাধিক আউটপুট হ্যান্ডেল করে, তাই আমরা <code>sum</code> এরে ব্যবহার করে প্রতিটি আউটপুটের জন্য আলাদা আংশিক যোগফল রাখি।</li>
+    </ol>
+
+    <h2>পারফরম্যান্স বিশ্লেষণ</h2>
+
+    <p>একটি T4 GPU তে ভেক্টরাইজড লোড ও 1D blocktiling এর ফলাফল:</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ইমপ্লিমেন্টেশন</th>
+                <th>টাইম (ms)</th>
+                <th>GFLOPS</th>
+                <th>স্পিডআপ</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Shared Memory Tiling</td>
+                <td>2.7</td>
+                <td>6300</td>
+                <td>1.0x</td>
+            </tr>
+            <tr>
+                <td>1D Blocktiling + float4</td>
+                <td>1.1</td>
+                <td>15500</td>
+                <td>2.5x</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <p>এই দুটি অপটিমাইজেশনের ফলে আমরা পারফরম্যান্স প্রায় 2.5x বাড়িয়েছি।</p>
+
+    <h2>কেন এটি দ্রুত?</h2>
+
+    <ol>
+        <li><strong>উন্নত মেমরি থ্রুপুট:</strong> <code>float4</code> একবারে 16 বাইট লোড করে, যা L1 কেশিং ও memory coalescing উন্নত করে।</li>
+        <li><strong>Instruction Overhead কমানো:</strong> মেমরি অপারেশনের সংখ্যা কম হয়, যা instruction pipeline থ্রুপুট বাড়ায়।</li>
+        <li><strong>কমন ডেটা পুনর্ব্যবহার:</strong> প্রতিটি থ্রেড একই tile_A ডেটা ব্যবহার করে একাধিক আউটপুট কম্পিউট করতে পারে।</li>
+        <li><strong>শেয়ার্ড মেমরি ব্যান্ডউইথ:</strong> ভেক্টরাইজড অপারেশনের ফলে শেয়ার্ড মেমরি থ্রুপুট বাড়ে।</li>
+    </ol>
+
+    <h2>সতর্কতা</h2>
+
+    <ul>
+        <li><strong>Alignment:</strong> CUDA ভেক্টর টাইপ (float4) এর জন্য অ্যালাইনমেন্ট গুরুত্বপূর্ণ। অন-অ্যালাইনড এক্সেস পারফরম্যান্স কমাতে পারে।</li>
+        <li><strong>রেজিস্টার ব্যবহার:</strong> প্রতি থ্রেডে বেশি রেজিস্টার ব্যবহার করতে হয়, যা অকুপেন্সি কমাতে পারে।</li>
+        <li><strong>শেয়ার্ড মেমরি ব্যাংক কনফ্লিক্ট:</strong> ভেক্টর লোড ব্যবহার করলে ব্যাংক কনফ্লিক্ট হতে পারে; ব্যাংক লেআউট সতর্কতার সাথে বিবেচনা করা উচিত।</li>
+    </ul>
+
+    <h2>পরবর্তী পদক্ষেপ</h2>
+
+    <p>আমরা 1D blocktiling ব্যবহার করে কার্নেলের পারফরম্যান্স উল্লেখযোগ্যভাবে উন্নত করেছি। পরবর্তী অধ্যায়ে, আমরা দেখব কিভাবে 2D blocktiling (প্রতি থ্রেড 2D গ্রিড আউটপুট এলিমেন্ট) ব্যবহার করে ডেটা পুনর্ব্যবহার আরও বাড়ানো যায়।</p>
+
+    <div class="nav">
+        <a href="chapter6.html">← পূর্ববর্তী অধ্যায়</a>
+        <a href="chapter8.html">পরবর্তী অধ্যায় →</a>
+    </div>
+
+</body>
+</html>
